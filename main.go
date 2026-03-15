@@ -328,8 +328,9 @@ func saveSession(id string) {
 	}
 	dir := sessionsDir()
 	os.MkdirAll(dir, 0700)
+	backend := readState().Backend
 	name := time.Now().Format("2006-01-02_15-04-05")
-	os.WriteFile(filepath.Join(dir, name), []byte(id), 0600)
+	os.WriteFile(filepath.Join(dir, name), []byte(backend+":"+id), 0600)
 }
 
 func listSessions() []string {
@@ -346,12 +347,18 @@ func listSessions() []string {
 	return out
 }
 
-func loadSession(name string) string {
+// loadSession returns (backend, sessionID) from a saved session file.
+func loadSession(name string) (string, string) {
 	data, err := os.ReadFile(filepath.Join(sessionsDir(), name))
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return strings.TrimSpace(string(data))
+	raw := strings.TrimSpace(string(data))
+	if backend, id, ok := strings.Cut(raw, ":"); ok {
+		return backend, id
+	}
+	// Legacy files without backend prefix — assume claude
+	return "claude", raw
 }
 
 func registerCommands(bot *tele.Bot) {
@@ -423,13 +430,16 @@ func handleCommand(text string, backends map[string]Backend) string {
 
 func handleSessions(arg string) string {
 	if arg != "" {
-		id := loadSession(arg)
+		backend, id := loadSession(arg)
 		if id == "" {
 			return "Session not found: " + arg
 		}
 		saveSession(readSession())
 		writeSession(id)
-		return "Switched to session " + arg
+		st := readState()
+		st.Backend = backend
+		writeState(st)
+		return fmt.Sprintf("Switched to %s session %s", backend, arg)
 	}
 	names := listSessions()
 	if len(names) == 0 {
@@ -439,12 +449,12 @@ func handleSessions(arg string) string {
 	var buf strings.Builder
 	buf.WriteString("Sessions:\n")
 	for _, n := range names {
-		id := loadSession(n)
+		backend, id := loadSession(n)
 		marker := "  "
 		if id == current {
 			marker = "> "
 		}
-		fmt.Fprintf(&buf, "%s%s (%s…)\n", marker, n, id[:8])
+		fmt.Fprintf(&buf, "%s%s [%s] (%s…)\n", marker, n, backend, id[:8])
 	}
 	buf.WriteString("\n/sessions <name> to switch")
 	return buf.String()
