@@ -275,6 +275,8 @@ type Backend struct {
 	ResultAppend bool     `json:"result_append,omitempty"`
 	Session      string   `json:"session"`
 	SessionWhen  string   `json:"session_when,omitempty"`
+	Error        string   `json:"error,omitempty"`
+	ErrorWhen    string   `json:"error_when,omitempty"`
 	DefaultModel string   `json:"default_model,omitempty"`
 }
 
@@ -714,6 +716,12 @@ func runJSON(cmd *exec.Cmd, b Backend) (result, session string, err error) {
 		return strings.TrimSpace(string(out)), "", nil
 	}
 
+	if b.ErrorWhen != "" && matchWhen(blob, b.ErrorWhen) {
+		errMsg, _ := jsonGet(blob, b.Error).(string)
+		if errMsg != "" {
+			return errMsg, "", fmt.Errorf("%s", errMsg)
+		}
+	}
 	result, _ = jsonGet(blob, b.Result).(string)
 	session, _ = jsonGet(blob, b.Session).(string)
 	return result, session, nil
@@ -751,9 +759,9 @@ func scanJSONL(scanner *bufio.Scanner, b Backend) (result, session, lastErr stri
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
 		}
-		if t, _ := line["type"].(string); t == "error" {
-			if msg, _ := line["message"].(string); msg != "" {
-				lastErr = msg
+		if b.ErrorWhen != "" && matchWhen(line, b.ErrorWhen) {
+			if v, _ := jsonGet(line, b.Error).(string); v != "" {
+				lastErr = v
 			}
 		}
 		if b.SessionWhen != "" && matchWhen(line, b.SessionWhen) {
