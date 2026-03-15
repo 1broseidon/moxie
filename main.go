@@ -605,9 +605,14 @@ func substArgs(tmpl []string, vars map[string]string) []string {
 		for k, v := range vars {
 			val = strings.ReplaceAll(val, "{"+k+"}", v)
 		}
-		if val != "" {
-			out = append(out, val)
+		if val == "" {
+			// Drop preceding flag when its value resolved to empty
+			if len(out) > 0 && strings.HasPrefix(out[len(out)-1], "-") {
+				out = out[:len(out)-1]
+			}
+			continue
 		}
+		out = append(out, val)
 	}
 	return out
 }
