@@ -701,6 +701,8 @@ func runJSONL(cmd *exec.Cmd, b Backend) (result, session string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		return "", "", err
 	}
@@ -725,7 +727,11 @@ func runJSONL(cmd *exec.Cmd, b Backend) (result, session string, err error) {
 		}
 	}
 
-	err = cmd.Wait()
+	if err = cmd.Wait(); err != nil {
+		if s := stderr.String(); s != "" {
+			log.Printf("stderr: %s", strings.TrimSpace(s))
+		}
+	}
 	return result, session, err
 }
 
