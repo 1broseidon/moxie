@@ -617,14 +617,9 @@ func substArgs(tmpl []string, vars map[string]string) []string {
 	return out
 }
 
-func dispatch(message, cwd string, backends map[string]Backend) string {
-	st := readState()
-	b, ok := backends[st.Backend]
-	if !ok {
-		return "Backend not configured: " + st.Backend
-	}
-
+func buildCmd(b Backend, message, cwd string) *exec.Cmd {
 	sessionID := readSession()
+	st := readState()
 	model := st.Model
 	if model == "" {
 		model = b.DefaultModel
@@ -648,15 +643,23 @@ func dispatch(message, cwd string, backends map[string]Backend) string {
 	}
 	args := substArgs(tmpl, vars)
 
-	if len(args) == 0 {
-		return "Backend command template is empty."
-	}
-
 	cmd := exec.Command(args[0], args[1:]...)
 	if cwd != "" && !containsVar(b.Cmd, "{cwd}") {
 		cmd.Dir = cwd
 	}
 	cmd.Env = os.Environ()
+	return cmd
+}
+
+func dispatch(message, cwd string, backends map[string]Backend) string {
+	st := readState()
+	b, ok := backends[st.Backend]
+	if !ok {
+		return "Backend not configured: " + st.Backend
+	}
+
+	sessionID := readSession()
+	cmd := buildCmd(b, message, cwd)
 
 	var result, newSession string
 	var err error
@@ -671,6 +674,9 @@ func dispatch(message, cwd string, backends map[string]Backend) string {
 	if err != nil {
 		log.Printf("%s error: %v", st.Backend, err)
 		clearSession()
+		if result != "" {
+			return result
+		}
 		return "Error — starting fresh next time."
 	}
 
@@ -726,11 +732,29 @@ func runJSONL(cmd *exec.Cmd, b Backend) (result, session string, err error) {
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	result, session, lastErr := scanJSONL(scanner, b)
 
+	if err = cmd.Wait(); err != nil {
+		if s := stderr.String(); s != "" {
+			log.Printf("stderr: %s", strings.TrimSpace(s))
+		}
+		if result == "" && lastErr != "" {
+			result = lastErr
+		}
+	}
+	return result, session, err
+}
+
+func scanJSONL(scanner *bufio.Scanner, b Backend) (result, session, lastErr string) {
 	for scanner.Scan() {
 		var line map[string]any
 		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
 			continue
+		}
+		if t, _ := line["type"].(string); t == "error" {
+			if msg, _ := line["message"].(string); msg != "" {
+				lastErr = msg
+			}
 		}
 		if b.SessionWhen != "" && matchWhen(line, b.SessionWhen) {
 			if v, _ := jsonGet(line, b.Session).(string); v != "" {
@@ -747,13 +771,7 @@ func runJSONL(cmd *exec.Cmd, b Backend) (result, session string, err error) {
 			}
 		}
 	}
-
-	if err = cmd.Wait(); err != nil {
-		if s := stderr.String(); s != "" {
-			log.Printf("stderr: %s", strings.TrimSpace(s))
-		}
-	}
-	return result, session, err
+	return
 }
 
 // jsonGet walks a dot-separated path into a map: "item.text" -> map["item"]["text"]
