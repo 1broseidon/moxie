@@ -328,9 +328,12 @@ func saveSession(id string) {
 	}
 	dir := sessionsDir()
 	os.MkdirAll(dir, 0700)
-	backend := readState().Backend
-	name := time.Now().Format("2006-01-02_15-04-05")
-	os.WriteFile(filepath.Join(dir, name), []byte(backend+":"+id), 0600)
+	short := id
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	name := readState().Backend + ":" + short
+	os.WriteFile(filepath.Join(dir, name), []byte(id), 0600)
 }
 
 func listSessions() []string {
@@ -347,18 +350,17 @@ func listSessions() []string {
 	return out
 }
 
-// loadSession returns (backend, sessionID) from a saved session file.
-func loadSession(name string) (string, string) {
+func loadSession(name string) (backend, id string) {
 	data, err := os.ReadFile(filepath.Join(sessionsDir(), name))
 	if err != nil {
 		return "", ""
 	}
-	raw := strings.TrimSpace(string(data))
-	if backend, id, ok := strings.Cut(raw, ":"); ok {
-		return backend, id
+	id = strings.TrimSpace(string(data))
+	backend, _, _ = strings.Cut(name, ":")
+	if backend == "" {
+		backend = "claude"
 	}
-	// Legacy files without backend prefix — assume claude
-	return "claude", raw
+	return
 }
 
 func registerCommands(bot *tele.Bot) {
@@ -447,14 +449,13 @@ func handleSessions(arg string) string {
 	}
 	current := readSession()
 	var buf strings.Builder
-	buf.WriteString("Sessions:\n")
 	for _, n := range names {
-		backend, id := loadSession(n)
+		_, id := loadSession(n)
 		marker := "  "
 		if id == current {
 			marker = "> "
 		}
-		fmt.Fprintf(&buf, "%s%s [%s] (%s…)\n", marker, n, backend, id[:8])
+		fmt.Fprintf(&buf, "%s%s\n", marker, n)
 	}
 	buf.WriteString("\n/sessions <name> to switch")
 	return buf.String()
