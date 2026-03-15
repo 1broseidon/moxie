@@ -272,6 +272,7 @@ type Backend struct {
 	Format       string   `json:"format"` // "json" or "jsonl"
 	Result       string   `json:"result"`
 	ResultWhen   string   `json:"result_when,omitempty"`
+	ResultAppend bool     `json:"result_append,omitempty"`
 	Session      string   `json:"session"`
 	SessionWhen  string   `json:"session_when,omitempty"`
 	DefaultModel string   `json:"default_model,omitempty"`
@@ -733,7 +734,11 @@ func runJSONL(cmd *exec.Cmd, b Backend) (result, session string, err error) {
 		}
 		if b.ResultWhen != "" && matchWhen(line, b.ResultWhen) {
 			if v, _ := jsonGet(line, b.Result).(string); v != "" {
-				result = v
+				if b.ResultAppend {
+					result += v
+				} else {
+					result = v
+				}
 			}
 		}
 	}
@@ -760,14 +765,19 @@ func jsonGet(m map[string]any, path string) any {
 	return cur
 }
 
-// matchWhen checks "key=value" against a JSON line
+// matchWhen checks "key=value[&key=value...]" against a JSON line
 func matchWhen(m map[string]any, when string) bool {
-	k, v, ok := strings.Cut(when, "=")
-	if !ok {
-		return false
+	for _, cond := range strings.Split(when, "&") {
+		k, v, ok := strings.Cut(cond, "=")
+		if !ok {
+			return false
+		}
+		got, _ := jsonGet(m, k).(string)
+		if got != v {
+			return false
+		}
 	}
-	got, _ := jsonGet(m, k).(string)
-	return got == v
+	return true
 }
 
 func parseListFlags(startIdx int) (format string, limit int) {
