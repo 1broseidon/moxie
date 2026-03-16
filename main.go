@@ -23,9 +23,14 @@ type Config struct {
 	ChatID int64  `json:"chat_id"`
 }
 
+var cfgDir string
+
 func configDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "tele")
+	if cfgDir == "" {
+		home, _ := os.UserHomeDir()
+		cfgDir = filepath.Join(home, ".config", "tele")
+	}
+	return cfgDir
 }
 
 func loadConfig() (Config, error) {
@@ -199,11 +204,7 @@ func cmdSend() {
 	if err != nil {
 		fatal("%v", err)
 	}
-
-	bot, err := newBot(cfg)
-	if err != nil {
-		fatal("bot init failed: %v", err)
-	}
+	bot := mustBot()
 
 	if _, err := bot.Send(tele.ChatID(cfg.ChatID), msg); err != nil {
 		fatal("send failed: %v", err)
@@ -211,37 +212,28 @@ func cmdSend() {
 	fmt.Println("sent")
 }
 
-func cmdMessages() {
+func mustBot() *tele.Bot {
 	cfg, err := loadConfig()
 	if err != nil {
 		fatal("%v", err)
 	}
-
-	format, limit := parseListFlags(2)
-
 	bot, err := newBot(cfg)
 	if err != nil {
 		fatal("bot init failed: %v", err)
 	}
+	return bot
+}
 
+func cmdMessages() {
+	format, limit := parseListFlags(2)
+	bot := mustBot()
 	updates := getUpdates(bot, -limit, 0)
-	msgs := extractMessages(updates)
-	printMessages(msgs, format)
+	printMessages(extractMessages(updates), format)
 }
 
 func cmdPoll() {
-	cfg, err := loadConfig()
-	if err != nil {
-		fatal("%v", err)
-	}
-
 	format, _ := parseListFlags(2)
-
-	bot, err := newBot(cfg)
-	if err != nil {
-		fatal("bot init failed: %v", err)
-	}
-
+	bot := mustBot()
 	updates := getUpdates(bot, cursorOffset(), 0)
 	msgs := extractMessages(updates)
 
@@ -317,10 +309,10 @@ func parseCommand(text string) (base, arg string) {
 
 func handleCommand(text string, backends map[string]oneagent.Backend) string {
 	base, arg := parseCommand(text)
+	st := readState()
 
 	switch base {
 	case "new":
-		st := readState()
 		if arg != "" {
 			if _, ok := backends[arg]; !ok {
 				names := make([]string, 0, len(backends))
@@ -336,7 +328,6 @@ func handleCommand(text string, backends map[string]oneagent.Backend) string {
 		writeState(st)
 		return fmt.Sprintf("New %s session.", st.Backend)
 	case "model":
-		st := readState()
 		b := backends[st.Backend]
 		if arg == "" {
 			model := st.Model
@@ -349,14 +340,13 @@ func handleCommand(text string, backends map[string]oneagent.Backend) string {
 		writeState(st)
 		return "Model set to " + arg
 	case "threads":
-		return handleThreads(arg)
+		return handleThreads(arg, st)
 	}
 	return ""
 }
 
-func handleThreads(arg string) string {
+func handleThreads(arg string, st State) string {
 	if arg != "" {
-		st := readState()
 		st.ThreadID = arg
 		writeState(st)
 		return "Switched to thread " + arg
@@ -365,11 +355,10 @@ func handleThreads(arg string) string {
 	if err != nil || len(ids) == 0 {
 		return "No saved threads."
 	}
-	current := readState().ThreadID
 	var buf strings.Builder
 	for _, id := range ids {
 		marker := "  "
-		if id == current {
+		if id == st.ThreadID {
 			marker = "> "
 		}
 		fmt.Fprintf(&buf, "%s%s\n", marker, id)
