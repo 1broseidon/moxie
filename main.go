@@ -454,28 +454,13 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 		return
 	}
 
-	var accumulated string
-	lastEdit := time.Time{}
-
+	lastActivity := time.Time{}
 	emit := func(ev oneagent.StreamEvent) {
-		switch ev.Type {
-		case "activity":
-			if ev.Activity != "" {
-				log.Printf("[%s] %s", st.Backend, ev.Activity)
-				if accumulated == "" && time.Since(lastEdit) > time.Second {
-					bot.Edit(sent, ev.Activity+"…")
-					lastEdit = time.Now()
-				}
-			}
-		case "delta":
-			accumulated += ev.Delta
-			if time.Since(lastEdit) > time.Second {
-				edit := accumulated
-				if len(edit) > 4000 {
-					edit = edit[:4000] + "\n…"
-				}
-				bot.Edit(sent, edit)
-				lastEdit = time.Now()
+		if ev.Type == "activity" && ev.Activity != "" {
+			log.Printf("[%s] %s", st.Backend, ev.Activity)
+			if time.Since(lastActivity) > 2*time.Second {
+				bot.Edit(sent, ev.Activity+"…")
+				lastActivity = time.Now()
 			}
 		}
 	}
