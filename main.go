@@ -118,6 +118,17 @@ func senderName(u *tele.User) string {
 	return u.FirstName
 }
 
+const teleSystemPrompt = `You are responding via a Telegram bot. Format all replies using Telegram HTML.
+Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <a href="url">link</a>.
+No markdown. No unsupported tags. Keep replies concise.`
+
+func injectSystemPrompt(client *oneagent.Client) {
+	for name, b := range client.Backends {
+		b.SystemPrompt = teleSystemPrompt
+		client.Backends[name] = b
+	}
+}
+
 func newBot(cfg Config) (*tele.Bot, error) {
 	return tele.NewBot(tele.Settings{Token: cfg.Token})
 }
@@ -430,7 +441,7 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 		} else {
 			text = ""
 		}
-		if _, err := bot.Send(tele.ChatID(chatID), chunk); err != nil {
+		if _, err := bot.Send(tele.ChatID(chatID), chunk, tele.ModeHTML); err != nil {
 			log.Printf("send error: %v", err)
 		}
 	}
@@ -459,7 +470,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 		if ev.Type == "activity" && ev.Activity != "" {
 			log.Printf("[%s] %s", st.Backend, ev.Activity)
 			if time.Since(lastActivity) > 2*time.Second {
-				bot.Edit(sent, ev.Activity+"…")
+				bot.Edit(sent, ev.Activity+"…", tele.ModeHTML)
 				lastActivity = time.Now()
 			}
 		}
@@ -469,7 +480,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 
 	if resp.Error != "" {
 		log.Printf("%s error: %s", st.Backend, resp.Error)
-		bot.Edit(sent, resp.Error)
+		bot.Edit(sent, resp.Error, tele.ModeHTML)
 		return
 	}
 
@@ -479,7 +490,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 	}
 
 	if len(finalText) <= 4000 {
-		bot.Edit(sent, finalText)
+		bot.Edit(sent, finalText, tele.ModeHTML)
 	} else {
 		bot.Delete(sent)
 		sendChunked(bot, chatID, finalText)
@@ -523,6 +534,7 @@ func cmdServe() {
 	}
 
 	client := &oneagent.Client{Backends: backends}
+	injectSystemPrompt(client)
 
 	bot, err := newBot(cfg)
 	if err != nil {
