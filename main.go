@@ -328,21 +328,38 @@ func handleCommand(text string, backends map[string]oneagent.Backend) string {
 		writeState(st)
 		return fmt.Sprintf("New %s session.", st.Backend)
 	case "model":
-		b := backends[st.Backend]
 		if arg == "" {
+			b := backends[st.Backend]
 			model := st.Model
 			if model == "" {
 				model = b.DefaultModel
 			}
 			return fmt.Sprintf("Backend: %s\nModel: %s", st.Backend, model)
 		}
-		st.Model = arg
-		writeState(st)
-		return "Model set to " + arg
+		return switchModel(arg, st, backends)
 	case "threads":
 		return handleThreads(arg, st)
 	}
 	return ""
+}
+
+func switchModel(arg string, st State, backends map[string]oneagent.Backend) string {
+	parts := strings.SplitN(arg, " ", 2)
+	if _, ok := backends[parts[0]]; ok {
+		st.Backend = parts[0]
+		st.Model = ""
+		if len(parts) > 1 {
+			st.Model = parts[1]
+		}
+		writeState(st)
+		if st.Model != "" {
+			return fmt.Sprintf("Switched to %s (%s)", st.Backend, st.Model)
+		}
+		return "Switched to " + st.Backend
+	}
+	st.Model = arg
+	writeState(st)
+	return "Model set to " + arg
 }
 
 func handleThreads(arg string, st State) string {
