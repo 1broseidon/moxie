@@ -409,41 +409,66 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 	}
 }
 
-func startTyping(bot *tele.Bot, chatID int64) func() {
-	done := make(chan struct{})
-	go func() {
-		for {
-			bot.Raw("sendChatAction", map[string]string{
-				"chat_id": strconv.FormatInt(chatID, 10),
-				"action":  "typing",
-			})
-			select {
-			case <-done:
-				return
-			case <-time.After(4 * time.Second):
-			}
-		}
-	}()
-	return func() { close(done) }
-}
+// --- Dispatch via oneagent with streaming ---
 
-// --- Dispatch via oneagent ---
-
-func dispatch(message, cwd string, backends map[string]oneagent.Backend) string {
+func dispatch(message, cwd string, bot *tele.Bot, chatID int64, backends map[string]oneagent.Backend) {
 	st := readState()
-	resp := oneagent.RunWithThread(backends, oneagent.RunOpts{
+	opts := oneagent.RunOpts{
 		Backend:  st.Backend,
 		Prompt:   message,
 		Model:    st.Model,
 		CWD:      cwd,
 		ThreadID: st.ThreadID,
-	})
+	}
+
+	// Send placeholder and stream updates into it
+	sent, err := bot.Send(tele.ChatID(chatID), "…")
+	if err != nil {
+		log.Printf("send error: %v", err)
+		return
+	}
+
+	var accumulated string
+	lastEdit := time.Time{}
+
+	emit := func(ev oneagent.StreamEvent) {
+		switch ev.Type {
+		case "activity":
+			if ev.Activity != "" {
+				log.Printf("[%s] %s", st.Backend, ev.Activity)
+			}
+		case "delta":
+			accumulated += ev.Delta
+			if time.Since(lastEdit) > time.Second {
+				edit := accumulated
+				if len(edit) > 4000 {
+					edit = edit[:4000] + "\n…"
+				}
+				bot.Edit(sent, edit)
+				lastEdit = time.Now()
+			}
+		}
+	}
+
+	resp := oneagent.RunWithThreadStream(backends, opts, emit)
 
 	if resp.Error != "" {
 		log.Printf("%s error: %s", st.Backend, resp.Error)
-		return resp.Error
+		bot.Edit(sent, resp.Error)
+		return
 	}
-	return resp.Result
+
+	finalText := resp.Result
+	if finalText == "" {
+		finalText = "Done — nothing to report."
+	}
+
+	if len(finalText) <= 4000 {
+		bot.Edit(sent, finalText)
+	} else {
+		bot.Delete(sent)
+		sendChunked(bot, chatID, finalText)
+	}
 }
 
 // --- Update handler ---
@@ -465,13 +490,7 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, backends
 		}
 	}
 
-	stop := startTyping(bot, cfg.ChatID)
-	response := dispatch(text, cwd, backends)
-	stop()
-
-	if response != "" {
-		sendChunked(bot, cfg.ChatID, response)
-	}
+	dispatch(text, cwd, bot, cfg.ChatID, backends)
 	writeCursor(u.ID)
 }
 
@@ -483,10 +502,9 @@ func cmdServe() {
 
 	cwd := parseServeFlags()
 
-	backendsPath := filepath.Join(oneagent.ConfigDir(), "backends.json")
-	backends, err := oneagent.LoadBackends(backendsPath)
+	backends, err := oneagent.LoadBackends("")
 	if err != nil {
-		fatal("no backends configured — create %s", backendsPath)
+		fatal("no backends: %v", err)
 	}
 
 	bot, err := newBot(cfg)
