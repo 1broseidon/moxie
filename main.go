@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -14,8 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/1broseidon/oneagent"
 	tele "gopkg.in/telebot.v4"
 )
+
+// --- Telegram config ---
 
 type Config struct {
 	Token  string `json:"token"`
@@ -29,12 +30,10 @@ func configDir() string {
 
 func loadConfig() (Config, error) {
 	path := filepath.Join(configDir(), "config.json")
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("config not found at %s: %w\nRun: tele init", path, err)
 	}
-
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("invalid config: %w", err)
@@ -42,38 +41,43 @@ func loadConfig() (Config, error) {
 	return cfg, nil
 }
 
+// --- Tele state (backend + model selection) ---
+
+type State struct {
+	Backend  string `json:"backend"`
+	Model    string `json:"model,omitempty"`
+	ThreadID string `json:"thread_id,omitempty"`
+}
+
+func statePath() string {
+	return filepath.Join(configDir(), "state.json")
+}
+
+func readState() State {
+	data, err := os.ReadFile(statePath())
+	if err != nil {
+		return State{Backend: "claude", ThreadID: "telegram"}
+	}
+	var s State
+	json.Unmarshal(data, &s)
+	if s.Backend == "" {
+		s.Backend = "claude"
+	}
+	if s.ThreadID == "" {
+		s.ThreadID = "telegram"
+	}
+	return s
+}
+
+func writeState(s State) {
+	data, _ := json.Marshal(s)
+	os.WriteFile(statePath(), data, 0600)
+}
+
+// --- Cursor (Telegram update offset) ---
+
 func cursorPath() string {
 	return filepath.Join(configDir(), "cursor")
-}
-
-func sessionPath() string {
-	return filepath.Join(configDir(), "session")
-}
-
-func senderName(u *tele.User) string {
-	if u == nil {
-		return "unknown"
-	}
-	if u.Username != "" {
-		return "@" + u.Username
-	}
-	return u.FirstName
-}
-
-func readSession() string {
-	data, err := os.ReadFile(sessionPath())
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-func writeSession(id string) {
-	os.WriteFile(sessionPath(), []byte(id), 0600)
-}
-
-func clearSession() {
-	os.Remove(sessionPath())
 }
 
 func cursorOffset() int {
@@ -96,6 +100,29 @@ func readCursor() int {
 func writeCursor(id int) {
 	os.WriteFile(cursorPath(), []byte(strconv.Itoa(id)), 0600)
 }
+
+// --- Helpers ---
+
+func senderName(u *tele.User) string {
+	if u == nil {
+		return "unknown"
+	}
+	if u.Username != "" {
+		return "@" + u.Username
+	}
+	return u.FirstName
+}
+
+func newBot(cfg Config) (*tele.Bot, error) {
+	return tele.NewBot(tele.Settings{Token: cfg.Token})
+}
+
+func fatal(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+
+// --- CLI entrypoint ---
 
 func main() {
 	if len(os.Args) < 2 {
@@ -137,7 +164,7 @@ Usage:
   tele cursor                            Show current cursor position
   tele cursor set <update_id>            Manually set cursor
   tele cursor reset                      Reset cursor to 0
-  tele serve [--cwd <dir>] [--model <m>] Long-poll and dispatch to claude CLI`)
+  tele serve [--cwd <dir>]               Long-poll and dispatch to agent backends`)
 }
 
 func cmdInit() {
@@ -219,11 +246,9 @@ func cmdPoll() {
 	msgs := extractMessages(updates)
 
 	if len(msgs) == 0 {
-		// Exit silently — no new messages
 		return
 	}
 
-	// Advance cursor to highest update_id
 	maxID := 0
 	for _, m := range msgs {
 		if m.ID > maxID {
@@ -231,7 +256,6 @@ func cmdPoll() {
 		}
 	}
 	writeCursor(maxID)
-
 	printMessages(msgs, format)
 }
 
@@ -263,108 +287,7 @@ func cmdCursor() {
 	}
 }
 
-// Backend config — loaded from ~/.config/tele/backends.json
-
-type Backend struct {
-	Cmd          []string `json:"cmd"`
-	ResumeCmd    []string `json:"resume_cmd,omitempty"`
-	SystemPrompt string   `json:"system_prompt,omitempty"`
-	Format       string   `json:"format"` // "json" or "jsonl"
-	Result       string   `json:"result"`
-	ResultWhen   string   `json:"result_when,omitempty"`
-	ResultAppend bool     `json:"result_append,omitempty"`
-	Session      string   `json:"session"`
-	SessionWhen  string   `json:"session_when,omitempty"`
-	Error        string   `json:"error,omitempty"`
-	ErrorWhen    string   `json:"error_when,omitempty"`
-	DefaultModel string   `json:"default_model,omitempty"`
-}
-
-func backendsPath() string {
-	return filepath.Join(configDir(), "backends.json")
-}
-
-func loadBackends() map[string]Backend {
-	data, err := os.ReadFile(backendsPath())
-	if err != nil {
-		return nil
-	}
-	var backends map[string]Backend
-	json.Unmarshal(data, &backends)
-	return backends
-}
-
-func statePath() string {
-	return filepath.Join(configDir(), "state.json")
-}
-
-type State struct {
-	Backend string `json:"backend"`
-	Model   string `json:"model,omitempty"`
-}
-
-func readState() State {
-	data, err := os.ReadFile(statePath())
-	if err != nil {
-		return State{Backend: "claude"}
-	}
-	var s State
-	json.Unmarshal(data, &s)
-	if s.Backend == "" {
-		s.Backend = "claude"
-	}
-	return s
-}
-
-func writeState(s State) {
-	data, _ := json.Marshal(s)
-	os.WriteFile(statePath(), data, 0600)
-}
-
-func sessionsDir() string {
-	return filepath.Join(configDir(), "sessions")
-}
-
-func saveSession(id string) {
-	if id == "" {
-		return
-	}
-	dir := sessionsDir()
-	os.MkdirAll(dir, 0700)
-	short := id
-	if len(short) > 8 {
-		short = short[:8]
-	}
-	name := readState().Backend + ":" + short
-	os.WriteFile(filepath.Join(dir, name), []byte(id), 0600)
-}
-
-func listSessions() []string {
-	entries, err := os.ReadDir(sessionsDir())
-	if err != nil {
-		return nil
-	}
-	var out []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			out = append(out, e.Name())
-		}
-	}
-	return out
-}
-
-func loadSession(name string) (backend, id string) {
-	data, err := os.ReadFile(filepath.Join(sessionsDir(), name))
-	if err != nil {
-		return "", ""
-	}
-	id = strings.TrimSpace(string(data))
-	backend, _, _ = strings.Cut(name, ":")
-	if backend == "" {
-		backend = "claude"
-	}
-	return
-}
+// --- Slash commands ---
 
 func registerCommands(bot *tele.Bot) {
 	cmds := []struct {
@@ -373,7 +296,7 @@ func registerCommands(bot *tele.Bot) {
 	}{
 		{"new", "New session (optionally: /new codex)"},
 		{"model", "Show or switch model"},
-		{"sessions", "List or switch sessions"},
+		{"threads", "List saved threads"},
 	}
 	data, _ := json.Marshal(map[string]any{"commands": cmds})
 	bot.Raw("setMyCommands", json.RawMessage(data))
@@ -392,14 +315,11 @@ func parseCommand(text string) (base, arg string) {
 	return
 }
 
-// handleCommand returns a reply string if the command was handled, or "" to pass through.
-func handleCommand(text string, backends map[string]Backend) string {
+func handleCommand(text string, backends map[string]oneagent.Backend) string {
 	base, arg := parseCommand(text)
 
 	switch base {
 	case "new":
-		saveSession(readSession())
-		clearSession()
 		st := readState()
 		if arg != "" {
 			if _, ok := backends[arg]; !ok {
@@ -411,8 +331,9 @@ func handleCommand(text string, backends map[string]Backend) string {
 			}
 			st.Backend = arg
 			st.Model = ""
-			writeState(st)
 		}
+		st.ThreadID = fmt.Sprintf("tg-%d", time.Now().Unix())
+		writeState(st)
 		return fmt.Sprintf("New %s session.", st.Backend)
 	case "model":
 		st := readState()
@@ -427,60 +348,45 @@ func handleCommand(text string, backends map[string]Backend) string {
 		st.Model = arg
 		writeState(st)
 		return "Model set to " + arg
-	case "sessions":
-		return handleSessions(arg)
+	case "threads":
+		return handleThreads(arg)
 	}
 	return ""
 }
 
-func handleSessions(arg string) string {
+func handleThreads(arg string) string {
 	if arg != "" {
-		backend, id := loadSession(arg)
-		if id == "" {
-			return "Session not found: " + arg
-		}
-		saveSession(readSession())
-		writeSession(id)
 		st := readState()
-		st.Backend = backend
+		st.ThreadID = arg
 		writeState(st)
-		return fmt.Sprintf("Switched to %s session %s", backend, arg)
+		return "Switched to thread " + arg
 	}
-	names := listSessions()
-	if len(names) == 0 {
-		return "No saved sessions."
+	ids, err := oneagent.ListThreads()
+	if err != nil || len(ids) == 0 {
+		return "No saved threads."
 	}
-	current := readSession()
+	current := readState().ThreadID
 	var buf strings.Builder
-	for _, n := range names {
-		_, id := loadSession(n)
+	for _, id := range ids {
 		marker := "  "
 		if id == current {
 			marker = "> "
 		}
-		fmt.Fprintf(&buf, "%s%s\n", marker, n)
+		fmt.Fprintf(&buf, "%s%s\n", marker, id)
 	}
-	buf.WriteString("\n/sessions <name> to switch")
+	buf.WriteString("\n/threads <name> to switch")
 	return buf.String()
 }
 
-func parseServeFlags() (cwd, model string) {
-	model = "sonnet"
+// --- Serve loop ---
+
+func parseServeFlags() string {
 	for i := 2; i < len(os.Args); i++ {
-		switch os.Args[i] {
-		case "--cwd":
-			if i+1 < len(os.Args) {
-				cwd = os.Args[i+1]
-				i++
-			}
-		case "--model":
-			if i+1 < len(os.Args) {
-				model = os.Args[i+1]
-				i++
-			}
+		if os.Args[i] == "--cwd" && i+1 < len(os.Args) {
+			return os.Args[i+1]
 		}
 	}
-	return
+	return ""
 }
 
 func seedCursor(bot *tele.Bot) {
@@ -514,7 +420,46 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 	}
 }
 
-func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, backends map[string]Backend) {
+func startTyping(bot *tele.Bot, chatID int64) func() {
+	done := make(chan struct{})
+	go func() {
+		for {
+			bot.Raw("sendChatAction", map[string]string{
+				"chat_id": strconv.FormatInt(chatID, 10),
+				"action":  "typing",
+			})
+			select {
+			case <-done:
+				return
+			case <-time.After(4 * time.Second):
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// --- Dispatch via oneagent ---
+
+func dispatch(message, cwd string, backends map[string]oneagent.Backend) string {
+	st := readState()
+	resp := oneagent.RunWithThread(backends, oneagent.RunOpts{
+		Backend:  st.Backend,
+		Prompt:   message,
+		Model:    st.Model,
+		CWD:      cwd,
+		ThreadID: st.ThreadID,
+	})
+
+	if resp.Error != "" {
+		log.Printf("%s error: %s", st.Backend, resp.Error)
+		return resp.Error
+	}
+	return resp.Result
+}
+
+// --- Update handler ---
+
+func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, backends map[string]oneagent.Backend) {
 	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID || u.Message.Text == "" {
 		writeCursor(u.ID)
 		return
@@ -547,11 +492,12 @@ func cmdServe() {
 		fatal("%v", err)
 	}
 
-	cwd, _ := parseServeFlags()
+	cwd := parseServeFlags()
 
-	backends := loadBackends()
-	if backends == nil {
-		fatal("no backends configured — create %s", backendsPath())
+	backendsPath := filepath.Join(oneagent.ConfigDir(), "backends.json")
+	backends, err := oneagent.LoadBackends(backendsPath)
+	if err != nil {
+		fatal("no backends configured — create %s", backendsPath)
 	}
 
 	bot, err := newBot(cfg)
@@ -563,7 +509,7 @@ func cmdServe() {
 	registerCommands(bot)
 
 	st := readState()
-	log.Printf("serving — backend=%s, cwd=%s", st.Backend, cwd)
+	log.Printf("serving — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, cwd)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -582,234 +528,7 @@ func cmdServe() {
 	}
 }
 
-func startTyping(bot *tele.Bot, chatID int64) func() {
-	done := make(chan struct{})
-	go func() {
-		for {
-			bot.Raw("sendChatAction", map[string]string{
-				"chat_id": strconv.FormatInt(chatID, 10),
-				"action":  "typing",
-			})
-			select {
-			case <-done:
-				return
-			case <-time.After(4 * time.Second):
-			}
-		}
-	}()
-	return func() { close(done) }
-}
-
-func substArgs(tmpl []string, vars map[string]string) []string {
-	out := make([]string, 0, len(tmpl))
-	for _, t := range tmpl {
-		val := t
-		for k, v := range vars {
-			val = strings.ReplaceAll(val, "{"+k+"}", v)
-		}
-		if val == "" {
-			// Drop preceding flag when its value resolved to empty
-			if len(out) > 0 && strings.HasPrefix(out[len(out)-1], "-") {
-				out = out[:len(out)-1]
-			}
-			continue
-		}
-		out = append(out, val)
-	}
-	return out
-}
-
-func buildCmd(b Backend, message, cwd string) *exec.Cmd {
-	sessionID := readSession()
-	st := readState()
-	model := st.Model
-	if model == "" {
-		model = b.DefaultModel
-	}
-
-	prompt := message
-	if sessionID == "" && b.SystemPrompt != "" {
-		prompt = b.SystemPrompt + "\n\n" + message
-	}
-
-	vars := map[string]string{
-		"prompt":  prompt,
-		"model":   model,
-		"cwd":     cwd,
-		"session": sessionID,
-	}
-
-	tmpl := b.Cmd
-	if sessionID != "" && len(b.ResumeCmd) > 0 {
-		tmpl = b.ResumeCmd
-	}
-	args := substArgs(tmpl, vars)
-
-	cmd := exec.Command(args[0], args[1:]...)
-	if cwd != "" && !containsVar(b.Cmd, "{cwd}") {
-		cmd.Dir = cwd
-	}
-	cmd.Env = os.Environ()
-	return cmd
-}
-
-func dispatch(message, cwd string, backends map[string]Backend) string {
-	st := readState()
-	b, ok := backends[st.Backend]
-	if !ok {
-		return "Backend not configured: " + st.Backend
-	}
-
-	sessionID := readSession()
-	cmd := buildCmd(b, message, cwd)
-
-	var result, newSession string
-	var err error
-
-	switch b.Format {
-	case "jsonl":
-		result, newSession, err = runJSONL(cmd, b)
-	default:
-		result, newSession, err = runJSON(cmd, b)
-	}
-
-	if err != nil {
-		log.Printf("%s error: %v", st.Backend, err)
-		clearSession()
-		if result != "" {
-			return result
-		}
-		return "Error — starting fresh next time."
-	}
-
-	if newSession != "" && newSession != sessionID {
-		writeSession(newSession)
-		log.Printf("session: %s", newSession)
-	}
-
-	if result == "" {
-		return "Done — nothing to report."
-	}
-	return result
-}
-
-func containsVar(tmpl []string, v string) bool {
-	for _, t := range tmpl {
-		if strings.Contains(t, v) {
-			return true
-		}
-	}
-	return false
-}
-
-func runJSON(cmd *exec.Cmd, b Backend) (result, session string, err error) {
-	out, err := cmd.Output()
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			log.Printf("stderr: %s", exitErr.Stderr)
-		}
-		return "", "", err
-	}
-
-	var blob map[string]any
-	if err := json.Unmarshal(out, &blob); err != nil {
-		return strings.TrimSpace(string(out)), "", nil
-	}
-
-	if b.ErrorWhen != "" && matchWhen(blob, b.ErrorWhen) {
-		errMsg, _ := jsonGet(blob, b.Error).(string)
-		if errMsg != "" {
-			return errMsg, "", fmt.Errorf("%s", errMsg)
-		}
-	}
-	result, _ = jsonGet(blob, b.Result).(string)
-	session, _ = jsonGet(blob, b.Session).(string)
-	return result, session, nil
-}
-
-func runJSONL(cmd *exec.Cmd, b Backend) (result, session string, err error) {
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", "", err
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return "", "", err
-	}
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	result, session, lastErr := scanJSONL(scanner, b)
-
-	if err = cmd.Wait(); err != nil {
-		if s := stderr.String(); s != "" {
-			log.Printf("stderr: %s", strings.TrimSpace(s))
-		}
-		if result == "" && lastErr != "" {
-			result = lastErr
-		}
-	}
-	return result, session, err
-}
-
-func scanJSONL(scanner *bufio.Scanner, b Backend) (result, session, lastErr string) {
-	for scanner.Scan() {
-		var line map[string]any
-		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
-			continue
-		}
-		if b.ErrorWhen != "" && matchWhen(line, b.ErrorWhen) {
-			if v, _ := jsonGet(line, b.Error).(string); v != "" {
-				lastErr = v
-			}
-		}
-		if b.SessionWhen != "" && matchWhen(line, b.SessionWhen) {
-			if v, _ := jsonGet(line, b.Session).(string); v != "" {
-				session = v
-			}
-		}
-		if b.ResultWhen != "" && matchWhen(line, b.ResultWhen) {
-			if v, _ := jsonGet(line, b.Result).(string); v != "" {
-				if b.ResultAppend {
-					result += v
-				} else {
-					result = v
-				}
-			}
-		}
-	}
-	return
-}
-
-// jsonGet walks a dot-separated path into a map: "item.text" -> map["item"]["text"]
-func jsonGet(m map[string]any, path string) any {
-	parts := strings.Split(path, ".")
-	var cur any = m
-	for _, p := range parts {
-		obj, ok := cur.(map[string]any)
-		if !ok {
-			return nil
-		}
-		cur = obj[p]
-	}
-	return cur
-}
-
-// matchWhen checks "key=value[&key=value...]" against a JSON line
-func matchWhen(m map[string]any, when string) bool {
-	for _, cond := range strings.Split(when, "&") {
-		k, v, ok := strings.Cut(cond, "=")
-		if !ok {
-			return false
-		}
-		got, _ := jsonGet(m, k).(string)
-		if got != v {
-			return false
-		}
-	}
-	return true
-}
+// --- Message display (for CLI subcommands) ---
 
 func parseListFlags(startIdx int) (format string, limit int) {
 	format = "md"
@@ -873,7 +592,7 @@ func printMessages(msgs []msgInfo, format string) {
 		for _, m := range msgs {
 			fmt.Printf("[%s] %s: %s\n", m.Time.Format("Jan 02 15:04"), m.From, m.Text)
 		}
-	default: // md
+	default:
 		for _, m := range msgs {
 			fmt.Printf("- **%s** (%s): %s\n", m.From, m.Time.Format("Jan 2 3:04pm"), m.Text)
 		}
@@ -910,15 +629,4 @@ func getUpdates(bot *tele.Bot, offset int, timeout int) []tele.Update {
 		fatal("failed to parse updates: %v", err)
 	}
 	return resp.Result
-}
-
-func newBot(cfg Config) (*tele.Bot, error) {
-	return tele.NewBot(tele.Settings{
-		Token: cfg.Token,
-	})
-}
-
-func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
 }
