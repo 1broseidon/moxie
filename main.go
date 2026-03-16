@@ -287,8 +287,9 @@ func registerCommands(bot *tele.Bot) {
 		Description string `json:"description"`
 	}{
 		{"new", "New session (optionally: /new codex)"},
-		{"model", "Show or switch model"},
+		{"model", "Show or switch model/backend"},
 		{"threads", "List saved threads"},
+		{"compact", "Summarize old thread turns"},
 	}
 	data, _ := json.Marshal(map[string]any{"commands": cmds})
 	bot.Raw("setMyCommands", json.RawMessage(data))
@@ -307,16 +308,16 @@ func parseCommand(text string) (base, arg string) {
 	return
 }
 
-func handleCommand(text string, backends map[string]oneagent.Backend) string {
+func handleCommand(text string, client *oneagent.Client) string {
 	base, arg := parseCommand(text)
 	st := readState()
 
 	switch base {
 	case "new":
 		if arg != "" {
-			if _, ok := backends[arg]; !ok {
-				names := make([]string, 0, len(backends))
-				for k := range backends {
+			if _, ok := client.Backends[arg]; !ok {
+				names := make([]string, 0, len(client.Backends))
+				for k := range client.Backends {
 					names = append(names, k)
 				}
 				return fmt.Sprintf("Unknown backend: %s\nAvailable: %s", arg, strings.Join(names, ", "))
@@ -329,23 +330,25 @@ func handleCommand(text string, backends map[string]oneagent.Backend) string {
 		return fmt.Sprintf("New %s session.", st.Backend)
 	case "model":
 		if arg == "" {
-			b := backends[st.Backend]
+			b := client.Backends[st.Backend]
 			model := st.Model
 			if model == "" {
 				model = b.DefaultModel
 			}
 			return fmt.Sprintf("Backend: %s\nModel: %s", st.Backend, model)
 		}
-		return switchModel(arg, st, backends)
+		return switchModel(arg, st, client)
 	case "threads":
-		return handleThreads(arg, st)
+		return handleThreads(arg, st, client)
+	case "compact":
+		return compactThread(st, client)
 	}
 	return ""
 }
 
-func switchModel(arg string, st State, backends map[string]oneagent.Backend) string {
+func switchModel(arg string, st State, client *oneagent.Client) string {
 	parts := strings.SplitN(arg, " ", 2)
-	if _, ok := backends[parts[0]]; ok {
+	if _, ok := client.Backends[parts[0]]; ok {
 		st.Backend = parts[0]
 		st.Model = ""
 		if len(parts) > 1 {
@@ -362,13 +365,13 @@ func switchModel(arg string, st State, backends map[string]oneagent.Backend) str
 	return "Model set to " + arg
 }
 
-func handleThreads(arg string, st State) string {
+func handleThreads(arg string, st State, client *oneagent.Client) string {
 	if arg != "" {
 		st.ThreadID = arg
 		writeState(st)
 		return "Switched to thread " + arg
 	}
-	ids, err := oneagent.ListThreads()
+	ids, err := client.ListThreads()
 	if err != nil || len(ids) == 0 {
 		return "No saved threads."
 	}
@@ -382,6 +385,13 @@ func handleThreads(arg string, st State) string {
 	}
 	buf.WriteString("\n/threads <name> to switch")
 	return buf.String()
+}
+
+func compactThread(st State, client *oneagent.Client) string {
+	if err := client.CompactThread(st.ThreadID, st.Backend); err != nil {
+		return "Compact failed: " + err.Error()
+	}
+	return "Thread compacted."
 }
 
 // --- Serve loop ---
@@ -428,7 +438,7 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 
 // --- Dispatch via oneagent with streaming ---
 
-func dispatch(message, cwd string, bot *tele.Bot, chatID int64, backends map[string]oneagent.Backend) {
+func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent.Client) {
 	st := readState()
 	opts := oneagent.RunOpts{
 		Backend:  st.Backend,
@@ -438,7 +448,6 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, backends map[str
 		ThreadID: st.ThreadID,
 	}
 
-	// Send placeholder and stream updates into it
 	sent, err := bot.Send(tele.ChatID(chatID), "…")
 	if err != nil {
 		log.Printf("send error: %v", err)
@@ -453,6 +462,10 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, backends map[str
 		case "activity":
 			if ev.Activity != "" {
 				log.Printf("[%s] %s", st.Backend, ev.Activity)
+				if accumulated == "" && time.Since(lastEdit) > time.Second {
+					bot.Edit(sent, ev.Activity+"…")
+					lastEdit = time.Now()
+				}
 			}
 		case "delta":
 			accumulated += ev.Delta
@@ -467,7 +480,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, backends map[str
 		}
 	}
 
-	resp := oneagent.RunWithThreadStream(backends, opts, emit)
+	resp := client.RunWithThreadStream(opts, emit)
 
 	if resp.Error != "" {
 		log.Printf("%s error: %s", st.Backend, resp.Error)
@@ -490,7 +503,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, backends map[str
 
 // --- Update handler ---
 
-func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, backends map[string]oneagent.Backend) {
+func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, client *oneagent.Client) {
 	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID || u.Message.Text == "" {
 		writeCursor(u.ID)
 		return
@@ -500,14 +513,14 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, backends
 	log.Printf("message from %s: %s", senderName(u.Message.Sender), text)
 
 	if strings.HasPrefix(text, "/") {
-		if reply := handleCommand(text, backends); reply != "" {
+		if reply := handleCommand(text, client); reply != "" {
 			sendChunked(bot, cfg.ChatID, reply)
 			writeCursor(u.ID)
 			return
 		}
 	}
 
-	dispatch(text, cwd, bot, cfg.ChatID, backends)
+	dispatch(text, cwd, bot, cfg.ChatID, client)
 	writeCursor(u.ID)
 }
 
@@ -523,6 +536,8 @@ func cmdServe() {
 	if err != nil {
 		fatal("no backends: %v", err)
 	}
+
+	client := &oneagent.Client{Backends: backends}
 
 	bot, err := newBot(cfg)
 	if err != nil {
@@ -547,7 +562,7 @@ func cmdServe() {
 		}
 
 		for _, u := range getUpdates(bot, cursorOffset(), 30) {
-			handleUpdate(u, bot, cfg, cwd, backends)
+			handleUpdate(u, bot, cfg, cwd, client)
 		}
 	}
 }
