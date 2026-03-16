@@ -447,7 +447,25 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 	}
 }
 
-// --- Dispatch via oneagent with streaming ---
+func startTyping(bot *tele.Bot, chatID int64) func() {
+	done := make(chan struct{})
+	go func() {
+		for {
+			bot.Raw("sendChatAction", map[string]string{
+				"chat_id": strconv.FormatInt(chatID, 10),
+				"action":  "typing",
+			})
+			select {
+			case <-done:
+				return
+			case <-time.After(4 * time.Second):
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+// --- Dispatch via oneagent ---
 
 func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent.Client) {
 	st := readState()
@@ -459,42 +477,28 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 		ThreadID: st.ThreadID,
 	}
 
-	sent, err := bot.Send(tele.ChatID(chatID), "…")
-	if err != nil {
-		log.Printf("send error: %v", err)
-		return
-	}
+	stop := startTyping(bot, chatID)
 
-	lastActivity := time.Time{}
 	emit := func(ev oneagent.StreamEvent) {
 		if ev.Type == "activity" && ev.Activity != "" {
 			log.Printf("[%s] %s", st.Backend, ev.Activity)
-			if time.Since(lastActivity) > 2*time.Second {
-				bot.Edit(sent, ev.Activity+"…", tele.ModeHTML)
-				lastActivity = time.Now()
-			}
 		}
 	}
 
 	resp := client.RunWithThreadStream(opts, emit)
+	stop()
 
 	if resp.Error != "" {
 		log.Printf("%s error: %s", st.Backend, resp.Error)
-		bot.Edit(sent, resp.Error, tele.ModeHTML)
+		sendChunked(bot, chatID, resp.Error)
 		return
 	}
 
-	finalText := resp.Result
-	if finalText == "" {
-		finalText = "Done — nothing to report."
+	result := resp.Result
+	if result == "" {
+		result = "Done — nothing to report."
 	}
-
-	if len(finalText) <= 4000 {
-		bot.Edit(sent, finalText, tele.ModeHTML)
-	} else {
-		bot.Delete(sent)
-		sendChunked(bot, chatID, finalText)
-	}
+	sendChunked(bot, chatID, result)
 }
 
 // --- Update handler ---
