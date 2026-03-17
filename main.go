@@ -419,9 +419,9 @@ func handleCWD(arg string, st State, cfg *Config) string {
 	}
 	name := parts[0]
 	if path, ok := cfg.Workspaces[name]; ok {
-		st.CWD = path
+		st.CWD = expandHome(path)
 		writeState(st)
-		return fmt.Sprintf("CWD: %s (%s)", name, path)
+		return fmt.Sprintf("CWD: %s (%s)", name, st.CWD)
 	}
 	return "Unknown workspace: " + name + "\n/cwd <name> <path> to create"
 }
@@ -497,7 +497,10 @@ func seedCursor(bot *tele.Bot) {
 	}
 }
 
+var htmlTagPattern = regexp.MustCompile(`<[^>]*>`)
+
 func sendChunked(bot *tele.Bot, chatID int64, text string) {
+
 	for len(text) > 0 {
 		chunk := text
 		if len(chunk) > 4000 {
@@ -511,9 +514,19 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 			text = ""
 		}
 		if _, err := bot.Send(tele.ChatID(chatID), chunk, tele.ModeHTML); err != nil {
-			// Fallback to plain text if HTML parsing fails
-			if _, err2 := bot.Send(tele.ChatID(chatID), chunk); err2 != nil {
-				log.Printf("send error: %v", err2)
+			log.Printf("send error: %v", err)
+			if !strings.Contains(err.Error(), "can't parse entities") {
+				continue
+			}
+
+			plainChunk := htmlTagPattern.ReplaceAllString(chunk, "")
+			if strings.TrimSpace(plainChunk) == "" {
+				log.Printf("plain text resend skipped: stripped chunk is empty")
+				continue
+			}
+
+			if _, plainErr := bot.Send(tele.ChatID(chatID), plainChunk); plainErr != nil {
+				log.Printf("plain text resend error: %v", plainErr)
 			}
 		}
 	}
