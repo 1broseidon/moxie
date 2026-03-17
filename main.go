@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -120,7 +122,10 @@ func senderName(u *tele.User) string {
 
 const teleSystemPrompt = `You are responding via a Telegram bot. Format all replies using Telegram HTML.
 Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <a href="url">link</a>.
-No markdown. No unsupported tags. Keep replies concise.`
+No markdown. No unsupported tags. Keep replies concise.
+To send a local file back to Telegram, include <send>/absolute/path/to/file</send> in your reply. The tag is stripped from the visible text and the file is uploaded separately.`
+
+var sendTagPattern = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
 
 func injectSystemPrompt(client *oneagent.Client) {
 	for name, b := range client.Backends {
@@ -465,6 +470,207 @@ func startTyping(bot *tele.Bot, chatID int64) func() {
 	return func() { close(done) }
 }
 
+func buildInboundPrompt(bot *tele.Bot, m *tele.Message) (string, error) {
+	if m == nil {
+		return "", nil
+	}
+	if m.Text != "" {
+		return m.Text, nil
+	}
+	if m.Photo != nil {
+		// telebot.v4 unmarshals Message.Photo to the largest available size.
+		path, err := saveTelegramFile(bot, m.Photo.MediaFile(), "", "photo", ".jpg")
+		if err != nil {
+			return "", err
+		}
+		return formatPhotoPrompt(path, m.Caption), nil
+	}
+	if m.Document != nil {
+		path, err := saveTelegramFile(bot, m.Document.MediaFile(), m.Document.FileName, "document", ".bin")
+		if err != nil {
+			return "", err
+		}
+		return formatDocumentPrompt(path, m.Document.FileName, m.Caption), nil
+	}
+	if m.Voice != nil {
+		path, err := saveTelegramFile(bot, m.Voice.MediaFile(), "", "voice", ".ogg")
+		if err != nil {
+			return "", err
+		}
+		return formatVoicePrompt(path, m.Caption), nil
+	}
+	return "", nil
+}
+
+func saveTelegramFile(bot *tele.Bot, file *tele.File, originalName, fallbackBase, defaultExt string) (string, error) {
+	if file == nil || file.FileID == "" {
+		return "", fmt.Errorf("missing telegram file id")
+	}
+
+	remoteFile, err := bot.FileByID(file.FileID)
+	if err != nil {
+		return "", fmt.Errorf("telegram file lookup failed: %w", err)
+	}
+
+	reader, err := bot.File(&remoteFile)
+	if err != nil {
+		return "", fmt.Errorf("telegram file download failed: %w", err)
+	}
+	defer reader.Close()
+
+	dir := filepath.Join(os.TempDir(), "tele-media")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", fmt.Errorf("create temp dir: %w", err)
+	}
+
+	dst, err := os.CreateTemp(dir, tempFilePattern(originalName, remoteFile.FilePath, fallbackBase, defaultExt))
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	defer dst.Close()
+
+	if _, err := io.Copy(dst, reader); err != nil {
+		return "", fmt.Errorf("save temp file: %w", err)
+	}
+	return dst.Name(), nil
+}
+
+func tempFilePattern(originalName, remotePath, fallbackBase, defaultExt string) string {
+	source := originalName
+	if source == "" {
+		source = remotePath
+	}
+
+	ext := strings.ToLower(filepath.Ext(source))
+	if ext == "" {
+		ext = defaultExt
+	}
+
+	base := sanitizeFileStem(strings.TrimSuffix(filepath.Base(source), filepath.Ext(source)), fallbackBase)
+	return base + "-*" + ext
+}
+
+func sanitizeFileStem(name, fallback string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+
+	cleaned := strings.Trim(b.String(), "._-")
+	if cleaned == "" {
+		return fallback
+	}
+	return cleaned
+}
+
+func formatPhotoPrompt(path, caption string) string {
+	lines := []string{fmt.Sprintf("User sent a photo: %s", path)}
+	if caption != "" {
+		lines = append(lines, "Caption: "+caption)
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "Request: Describe this image")
+	return strings.Join(lines, "\n")
+}
+
+func formatDocumentPrompt(path, fileName, caption string) string {
+	if fileName == "" {
+		fileName = filepath.Base(path)
+	}
+
+	lines := []string{fmt.Sprintf("User sent a file: %s", path)}
+	if fileName != "" {
+		lines = append(lines, "Filename: "+fileName)
+	}
+	if caption != "" {
+		lines = append(lines, "Caption: "+caption)
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "Request: User sent file: "+fileName)
+	return strings.Join(lines, "\n")
+}
+
+func formatVoicePrompt(path, caption string) string {
+	lines := []string{fmt.Sprintf("User sent a voice message: %s", path)}
+	if caption != "" {
+		lines = append(lines, "Caption: "+caption)
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "Request: User sent a voice message")
+	return strings.Join(lines, "\n")
+}
+
+func splitResponseFiles(text string) ([]string, string) {
+	matches := sendTagPattern.FindAllStringSubmatch(text, -1)
+	paths := make([]string, 0, len(matches))
+	for _, match := range matches {
+		path := strings.TrimSpace(match[1])
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	cleaned := strings.TrimSpace(sendTagPattern.ReplaceAllString(text, ""))
+	return paths, cleaned
+}
+
+func sendTaggedFiles(bot *tele.Bot, chatID int64, paths []string) []string {
+	failures := make([]string, 0)
+	for _, path := range paths {
+		if err := sendTaggedFile(bot, chatID, path); err != nil {
+			log.Printf("send file error for %s: %v", path, err)
+			failures = append(failures, "Failed to send file: "+filepath.Base(path))
+		}
+	}
+	return failures
+}
+
+func sendTaggedFile(bot *tele.Bot, chatID int64, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return fmt.Errorf("empty file path")
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory")
+	}
+
+	file := tele.FromDisk(path)
+	if isPhotoPath(path) {
+		_, err = bot.Send(tele.ChatID(chatID), &tele.Photo{File: file})
+		return err
+	}
+
+	_, err = bot.Send(tele.ChatID(chatID), &tele.Document{
+		File:     file,
+		FileName: filepath.Base(path),
+	})
+	return err
+}
+
+func isPhotoPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg", ".png", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
 // --- Dispatch via oneagent ---
 
 func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent.Client) {
@@ -495,23 +701,33 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 	}
 
 	result := resp.Result
-	if result == "" {
-		result = "Done — nothing to report."
+	paths, text := splitResponseFiles(result)
+	failures := sendTaggedFiles(bot, chatID, paths)
+	if len(failures) > 0 {
+		if text != "" {
+			text += "\n\n" + strings.Join(failures, "\n")
+		} else {
+			text = strings.Join(failures, "\n")
+		}
 	}
-	sendChunked(bot, chatID, result)
+	if text == "" && len(paths) == 0 {
+		text = "Done — nothing to report."
+	}
+	if text == "" {
+		return
+	}
+	sendChunked(bot, chatID, text)
 }
 
 // --- Update handler ---
 
 func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, client *oneagent.Client) {
-	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID || u.Message.Text == "" {
+	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID {
 		writeCursor(u.ID)
 		return
 	}
 
 	text := u.Message.Text
-	log.Printf("message from %s: %s", senderName(u.Message.Sender), text)
-
 	if strings.HasPrefix(text, "/") {
 		if reply := handleCommand(text, client); reply != "" {
 			sendChunked(bot, cfg.ChatID, reply)
@@ -520,7 +736,21 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, client *
 		}
 	}
 
-	dispatch(text, cwd, bot, cfg.ChatID, client)
+	prompt, err := buildInboundPrompt(bot, u.Message)
+	if err != nil {
+		log.Printf("message processing error: %v", err)
+		sendChunked(bot, cfg.ChatID, "Failed to process the incoming media.")
+		writeCursor(u.ID)
+		return
+	}
+	if prompt == "" {
+		writeCursor(u.ID)
+		return
+	}
+
+	log.Printf("message from %s: %s", senderName(u.Message.Sender), prompt)
+
+	dispatch(prompt, cwd, bot, cfg.ChatID, client)
 	writeCursor(u.ID)
 }
 
