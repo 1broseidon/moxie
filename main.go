@@ -56,8 +56,12 @@ type State struct {
 	ThreadID string `json:"thread_id,omitempty"`
 }
 
+func configFile(name string) string {
+	return filepath.Join(configDir(), name)
+}
+
 func statePath() string {
-	return filepath.Join(configDir(), "state.json")
+	return configFile("state.json")
 }
 
 func readState() State {
@@ -84,7 +88,7 @@ func writeState(s State) {
 // --- Cursor (Telegram update offset) ---
 
 func cursorPath() string {
-	return filepath.Join(configDir(), "cursor")
+	return configFile("cursor")
 }
 
 func cursorOffset() int {
@@ -125,7 +129,10 @@ Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</
 No markdown. No unsupported tags. Keep replies concise.
 To send a local file back to Telegram, include <send>/absolute/path/to/file</send> in your reply. The tag is stripped from the visible text and the file is uploaded separately.`
 
-var sendTagPattern = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
+var (
+	sendTagPattern  = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
+	unsafeFileChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+)
 
 func injectSystemPrompt(client *oneagent.Client) {
 	for name, b := range client.Backends {
@@ -214,21 +221,15 @@ func cmdSend() {
 	if len(os.Args) < 3 {
 		fatal("usage: tele send <message>")
 	}
-
 	msg := strings.Join(os.Args[2:], " ")
-	cfg, err := loadConfig()
-	if err != nil {
-		fatal("%v", err)
-	}
-	bot := mustBot()
-
+	cfg, bot := mustConfigAndBot()
 	if _, err := bot.Send(tele.ChatID(cfg.ChatID), msg); err != nil {
 		fatal("send failed: %v", err)
 	}
 	fmt.Println("sent")
 }
 
-func mustBot() *tele.Bot {
+func mustConfigAndBot() (Config, *tele.Bot) {
 	cfg, err := loadConfig()
 	if err != nil {
 		fatal("%v", err)
@@ -237,19 +238,19 @@ func mustBot() *tele.Bot {
 	if err != nil {
 		fatal("bot init failed: %v", err)
 	}
-	return bot
+	return cfg, bot
 }
 
 func cmdMessages() {
 	format, limit := parseListFlags(2)
-	bot := mustBot()
+	_, bot := mustConfigAndBot()
 	updates := getUpdates(bot, -limit, 0)
 	printMessages(extractMessages(updates), format)
 }
 
 func cmdPoll() {
 	format, _ := parseListFlags(2)
-	bot := mustBot()
+	_, bot := mustConfigAndBot()
 	updates := getUpdates(bot, cursorOffset(), 0)
 	msgs := extractMessages(updates)
 
@@ -483,21 +484,25 @@ func buildInboundPrompt(bot *tele.Bot, m *tele.Message) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return formatPhotoPrompt(path, m.Caption), nil
+		return formatMediaPrompt("a photo", path, m.Caption, "Describe this image"), nil
 	}
 	if m.Document != nil {
 		path, err := saveTelegramFile(bot, m.Document.MediaFile(), m.Document.FileName, "document", ".bin")
 		if err != nil {
 			return "", err
 		}
-		return formatDocumentPrompt(path, m.Document.FileName, m.Caption), nil
+		name := m.Document.FileName
+		if name == "" {
+			name = filepath.Base(path)
+		}
+		return formatMediaPrompt("a file ("+name+")", path, m.Caption, "User sent file: "+name), nil
 	}
 	if m.Voice != nil {
 		path, err := saveTelegramFile(bot, m.Voice.MediaFile(), "", "voice", ".ogg")
 		if err != nil {
 			return "", err
 		}
-		return formatVoicePrompt(path, m.Caption), nil
+		return formatMediaPrompt("a voice message", path, m.Caption, "User sent a voice message"), nil
 	}
 	return "", nil
 }
@@ -551,64 +556,19 @@ func tempFilePattern(originalName, remotePath, fallbackBase, defaultExt string) 
 }
 
 func sanitizeFileStem(name, fallback string) string {
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r)
-		case r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r == '-' || r == '_' || r == '.':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-
-	cleaned := strings.Trim(b.String(), "._-")
+	cleaned := strings.Trim(unsafeFileChars.ReplaceAllString(name, "_"), "._-")
 	if cleaned == "" {
 		return fallback
 	}
 	return cleaned
 }
 
-func formatPhotoPrompt(path, caption string) string {
-	lines := []string{fmt.Sprintf("User sent a photo: %s", path)}
+func formatMediaPrompt(kind, path, caption, fallbackRequest string) string {
+	line := fmt.Sprintf("User sent %s: %s", kind, path)
 	if caption != "" {
-		lines = append(lines, "Caption: "+caption)
-		return strings.Join(lines, "\n")
+		return line + "\nCaption: " + caption
 	}
-	lines = append(lines, "Request: Describe this image")
-	return strings.Join(lines, "\n")
-}
-
-func formatDocumentPrompt(path, fileName, caption string) string {
-	if fileName == "" {
-		fileName = filepath.Base(path)
-	}
-
-	lines := []string{fmt.Sprintf("User sent a file: %s", path)}
-	if fileName != "" {
-		lines = append(lines, "Filename: "+fileName)
-	}
-	if caption != "" {
-		lines = append(lines, "Caption: "+caption)
-		return strings.Join(lines, "\n")
-	}
-	lines = append(lines, "Request: User sent file: "+fileName)
-	return strings.Join(lines, "\n")
-}
-
-func formatVoicePrompt(path, caption string) string {
-	lines := []string{fmt.Sprintf("User sent a voice message: %s", path)}
-	if caption != "" {
-		lines = append(lines, "Caption: "+caption)
-		return strings.Join(lines, "\n")
-	}
-	lines = append(lines, "Request: User sent a voice message")
-	return strings.Join(lines, "\n")
+	return line + "\nRequest: " + fallbackRequest
 }
 
 func splitResponseFiles(text string) ([]string, string) {
@@ -640,22 +600,12 @@ func sendTaggedFile(bot *tele.Bot, chatID int64, path string) error {
 	if path == "" {
 		return fmt.Errorf("empty file path")
 	}
-
-	info, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if info.IsDir() {
-		return fmt.Errorf("path is a directory")
-	}
-
 	file := tele.FromDisk(path)
 	if isPhotoPath(path) {
-		_, err = bot.Send(tele.ChatID(chatID), &tele.Photo{File: file})
+		_, err := bot.Send(tele.ChatID(chatID), &tele.Photo{File: file})
 		return err
 	}
-
-	_, err = bot.Send(tele.ChatID(chatID), &tele.Document{
+	_, err := bot.Send(tele.ChatID(chatID), &tele.Document{
 		File:     file,
 		FileName: filepath.Base(path),
 	})
