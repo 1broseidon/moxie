@@ -710,6 +710,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 		Model:    st.Model,
 		CWD:      cwd,
 		ThreadID: st.ThreadID,
+		Source:   "telegram",
 	}
 
 	stop := startTyping(bot, chatID)

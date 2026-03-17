@@ -60,6 +60,10 @@ github.com/1broseidon/oneagent v0.0.0-20260316051242-8612050c7613 h1:A9gId4CRUHP
 github.com/1broseidon/oneagent v0.0.0-20260316051242-8612050c7613/go.mod h1:mwWWMUSlvWAg3e3/2ZABlN68QLRsNMgatMDljAvXZ48=
 github.com/1broseidon/oneagent v0.0.0-20260316151047-c0ad800f7ea3 h1:ReCBNvGyAzVztMnRRKseOSgEcO8uEQ1aVEvj8qsdt88=
 github.com/1broseidon/oneagent v0.0.0-20260316151047-c0ad800f7ea3/go.mod h1:mwWWMUSlvWAg3e3/2ZABlN68QLRsNMgatMDljAvXZ48=
+github.com/1broseidon/oneagent v0.10.1 h1:YJurGE3qt70BlOfqn2LOxlB2s2ZK9+Mx14nmlVc0FSM=
+github.com/1broseidon/oneagent v0.10.1/go.mod h1:mwWWMUSlvWAg3e3/2ZABlN68QLRsNMgatMDljAvXZ48=
+github.com/1broseidon/oneagent v0.10.2 h1:1YZwkldDymuqbuYOxLn2EbqgWft2XyOoU/GYDAQ8FgM=
+github.com/1broseidon/oneagent v0.10.2/go.mod h1:mwWWMUSlvWAg3e3/2ZABlN68QLRsNMgatMDljAvXZ48=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
 github.com/DataDog/datadog-go v3.2.0+incompatible/go.mod h1:LButxg5PwREeZtORoXG3tL4fMGNddJ+vMq1mwgfaqoQ=
