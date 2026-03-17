@@ -37,14 +37,9 @@ func configDir() string {
 }
 
 func loadConfig() (Config, error) {
-	path := filepath.Join(configDir(), "config.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("config not found at %s: %w\nRun: tele init", path, err)
-	}
 	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("invalid config: %w", err)
+	if err := readJSON("config.json", &cfg); err != nil {
+		return Config{}, fmt.Errorf("config not found: %w\nRun: tele init", err)
 	}
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = map[string]string{}
@@ -54,7 +49,7 @@ func loadConfig() (Config, error) {
 
 func saveConfig(cfg Config) {
 	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(filepath.Join(configDir(), "config.json"), data, 0600)
+	os.WriteFile(configFile("config.json"), data, 0600)
 }
 
 // --- Tele state (backend + model selection) ---
@@ -70,17 +65,22 @@ func configFile(name string) string {
 	return filepath.Join(configDir(), name)
 }
 
-func statePath() string {
-	return configFile("state.json")
+func readJSON(name string, v any) error {
+	data, err := os.ReadFile(configFile(name))
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+func writeJSON(name string, v any) {
+	data, _ := json.Marshal(v)
+	os.WriteFile(configFile(name), data, 0600)
 }
 
 func readState() State {
-	data, err := os.ReadFile(statePath())
-	if err != nil {
-		return State{Backend: "claude", ThreadID: "telegram"}
-	}
 	var s State
-	json.Unmarshal(data, &s)
+	readJSON("state.json", &s)
 	if s.Backend == "" {
 		s.Backend = "claude"
 	}
@@ -90,27 +90,19 @@ func readState() State {
 	return s
 }
 
-func writeState(s State) {
-	data, _ := json.Marshal(s)
-	os.WriteFile(statePath(), data, 0600)
-}
+func writeState(s State) { writeJSON("state.json", s) }
 
 // --- Cursor (Telegram update offset) ---
 
-func cursorPath() string {
-	return configFile("cursor")
-}
-
 func cursorOffset() int {
-	c := readCursor()
-	if c > 0 {
+	if c := readCursor(); c > 0 {
 		return c + 1
 	}
 	return 0
 }
 
 func readCursor() int {
-	data, err := os.ReadFile(cursorPath())
+	data, err := os.ReadFile(configFile("cursor"))
 	if err != nil {
 		return 0
 	}
@@ -119,7 +111,7 @@ func readCursor() int {
 }
 
 func writeCursor(id int) {
-	os.WriteFile(cursorPath(), []byte(strconv.Itoa(id)), 0600)
+	os.WriteFile(configFile("cursor"), []byte(strconv.Itoa(id)), 0600)
 }
 
 // --- Helpers ---
@@ -253,28 +245,29 @@ func mustConfigAndBot() (Config, *tele.Bot) {
 
 func cmdMessages() {
 	format, limit := parseListFlags(2)
-	_, bot := mustConfigAndBot()
-	updates := getUpdates(bot, -limit, 0)
-	printMessages(extractMessages(updates), format)
+	fetchAndPrint(format, -limit, false)
 }
 
 func cmdPoll() {
 	format, _ := parseListFlags(2)
-	_, bot := mustConfigAndBot()
-	updates := getUpdates(bot, cursorOffset(), 0)
-	msgs := extractMessages(updates)
+	fetchAndPrint(format, cursorOffset(), true)
+}
 
+func fetchAndPrint(format string, offset int, advanceCursor bool) {
+	_, bot := mustConfigAndBot()
+	msgs := extractMessages(getUpdates(bot, offset, 0))
 	if len(msgs) == 0 {
 		return
 	}
-
-	maxID := 0
-	for _, m := range msgs {
-		if m.ID > maxID {
-			maxID = m.ID
+	if advanceCursor {
+		maxID := 0
+		for _, m := range msgs {
+			if m.ID > maxID {
+				maxID = m.ID
+			}
 		}
+		writeCursor(maxID)
 	}
-	writeCursor(maxID)
 	printMessages(msgs, format)
 }
 
@@ -293,7 +286,7 @@ func cmdCursor() {
 			fmt.Printf("cursor set to %d\n", n)
 			return
 		case "reset":
-			os.Remove(cursorPath())
+			os.Remove(configFile("cursor"))
 			fmt.Println("cursor reset")
 			return
 		}
@@ -358,7 +351,10 @@ func handleCommand(text string, client *oneagent.Client, cfg *Config) string {
 	case "threads":
 		return handleThreads(arg, st, client)
 	case "compact":
-		return compactThread(st, client)
+		if err := client.CompactThread(st.ThreadID, st.Backend); err != nil {
+			return "Compact failed: " + err.Error()
+		}
+		return "Thread compacted."
 	}
 	return ""
 }
@@ -467,13 +463,6 @@ func handleThreads(arg string, st State, client *oneagent.Client) string {
 	return buf.String()
 }
 
-func compactThread(st State, client *oneagent.Client) string {
-	if err := client.CompactThread(st.ThreadID, st.Backend); err != nil {
-		return "Compact failed: " + err.Error()
-	}
-	return "Thread compacted."
-}
-
 // --- Serve loop ---
 
 func parseServeFlags() string {
@@ -557,33 +546,33 @@ func buildInboundPrompt(bot *tele.Bot, m *tele.Message) (string, error) {
 	if m.Text != "" {
 		return m.Text, nil
 	}
-	if m.Photo != nil {
-		// telebot.v4 unmarshals Message.Photo to the largest available size.
-		path, err := saveTelegramFile(bot, m.Photo.MediaFile(), "", "photo", ".jpg")
-		if err != nil {
-			return "", err
-		}
-		return formatMediaPrompt("a photo", path, m.Caption, "Describe this image"), nil
+
+	var file *tele.File
+	var origName, base, ext, kind, fallback string
+
+	switch {
+	case m.Photo != nil:
+		file, base, ext = m.Photo.MediaFile(), "photo", ".jpg"
+		kind, fallback = "a photo", "Describe this image"
+	case m.Document != nil:
+		file, origName, base, ext = m.Document.MediaFile(), m.Document.FileName, "document", ".bin"
+		kind, fallback = "a file", "User sent a file"
+	case m.Voice != nil:
+		file, base, ext = m.Voice.MediaFile(), "voice", ".ogg"
+		kind, fallback = "a voice message", "User sent a voice message"
+	default:
+		return "", nil
 	}
-	if m.Document != nil {
-		path, err := saveTelegramFile(bot, m.Document.MediaFile(), m.Document.FileName, "document", ".bin")
-		if err != nil {
-			return "", err
-		}
-		name := m.Document.FileName
-		if name == "" {
-			name = filepath.Base(path)
-		}
-		return formatMediaPrompt("a file ("+name+")", path, m.Caption, "User sent file: "+name), nil
+
+	path, err := saveTelegramFile(bot, file, origName, base, ext)
+	if err != nil {
+		return "", err
 	}
-	if m.Voice != nil {
-		path, err := saveTelegramFile(bot, m.Voice.MediaFile(), "", "voice", ".ogg")
-		if err != nil {
-			return "", err
-		}
-		return formatMediaPrompt("a voice message", path, m.Caption, "User sent a voice message"), nil
+	if origName != "" {
+		kind = "a file (" + origName + ")"
+		fallback = "User sent file: " + origName
 	}
-	return "", nil
+	return formatMediaPrompt(kind, path, m.Caption, fallback), nil
 }
 
 func saveTelegramFile(bot *tele.Bot, file *tele.File, originalName, fallbackBase, defaultExt string) (string, error) {
@@ -702,8 +691,7 @@ func isPhotoPath(path string) bool {
 
 // --- Dispatch via oneagent ---
 
-func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent.Client) {
-	st := readState()
+func dispatch(message, cwd string, bot *tele.Bot, chatID int64, st State, client *oneagent.Client) {
 	opts := oneagent.RunOpts{
 		Backend:  st.Backend,
 		Prompt:   message,
@@ -751,9 +739,8 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 
 // --- Update handler ---
 
-func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, client *oneagent.Client) {
+func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, st State, client *oneagent.Client) {
 	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID {
-		writeCursor(u.ID)
 		return
 	}
 
@@ -761,7 +748,6 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, 
 	if strings.HasPrefix(text, "/") {
 		if reply := handleCommand(text, client, cfg); reply != "" {
 			sendChunked(bot, cfg.ChatID, reply)
-			writeCursor(u.ID)
 			return
 		}
 	}
@@ -770,22 +756,19 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, 
 	if err != nil {
 		log.Printf("message processing error: %v", err)
 		sendChunked(bot, cfg.ChatID, "Failed to process the incoming media.")
-		writeCursor(u.ID)
 		return
 	}
 	if prompt == "" {
-		writeCursor(u.ID)
 		return
 	}
 
 	log.Printf("message from %s: %s", senderName(u.Message.Sender), prompt)
 
-	cwd := readState().CWD
+	cwd := st.CWD
 	if cwd == "" {
 		cwd = defaultCWD
 	}
-	dispatch(prompt, cwd, bot, cfg.ChatID, client)
-	writeCursor(u.ID)
+	dispatch(prompt, cwd, bot, cfg.ChatID, st, client)
 }
 
 func cmdServe() {
@@ -812,11 +795,19 @@ func cmdServe() {
 	seedCursor(bot)
 	registerCommands(bot)
 
+	cursor := readCursor()
 	st := readState()
 	log.Printf("serving — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	offset := func() int {
+		if cursor > 0 {
+			return cursor + 1
+		}
+		return 0
+	}
 
 	for {
 		select {
@@ -826,8 +817,11 @@ func cmdServe() {
 		default:
 		}
 
-		for _, u := range getUpdates(bot, cursorOffset(), 30) {
-			handleUpdate(u, bot, &cfg, defaultCWD, client)
+		for _, u := range getUpdates(bot, offset(), 30) {
+			st = readState()
+			handleUpdate(u, bot, &cfg, defaultCWD, st, client)
+			cursor = u.ID
+			writeCursor(cursor)
 		}
 	}
 }
