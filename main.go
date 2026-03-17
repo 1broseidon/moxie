@@ -21,8 +21,9 @@ import (
 // --- Telegram config ---
 
 type Config struct {
-	Token  string `json:"token"`
-	ChatID int64  `json:"chat_id"`
+	Token      string            `json:"token"`
+	ChatID     int64             `json:"chat_id"`
+	Workspaces map[string]string `json:"workspaces,omitempty"`
 }
 
 var cfgDir string
@@ -45,7 +46,15 @@ func loadConfig() (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("invalid config: %w", err)
 	}
+	if cfg.Workspaces == nil {
+		cfg.Workspaces = map[string]string{}
+	}
 	return cfg, nil
+}
+
+func saveConfig(cfg Config) {
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(filepath.Join(configDir(), "config.json"), data, 0600)
 }
 
 // --- Tele state (backend + model selection) ---
@@ -54,6 +63,7 @@ type State struct {
 	Backend  string `json:"backend"`
 	Model    string `json:"model,omitempty"`
 	ThreadID string `json:"thread_id,omitempty"`
+	CWD      string `json:"cwd,omitempty"`
 }
 
 func configFile(name string) string {
@@ -303,8 +313,9 @@ func registerCommands(bot *tele.Bot) {
 		Command     string `json:"command"`
 		Description string `json:"description"`
 	}{
-		{"new", "New session (optionally: /new codex)"},
+		{"new", "New thread (/new [backend] [workspace])"},
 		{"model", "Show or switch model/backend"},
+		{"cwd", "Show, switch, or save workspace"},
 		{"threads", "List saved threads"},
 		{"compact", "Summarize old thread turns"},
 	}
@@ -325,26 +336,13 @@ func parseCommand(text string) (base, arg string) {
 	return
 }
 
-func handleCommand(text string, client *oneagent.Client) string {
+func handleCommand(text string, client *oneagent.Client, cfg *Config) string {
 	base, arg := parseCommand(text)
 	st := readState()
 
 	switch base {
 	case "new":
-		if arg != "" {
-			if _, ok := client.Backends[arg]; !ok {
-				names := make([]string, 0, len(client.Backends))
-				for k := range client.Backends {
-					names = append(names, k)
-				}
-				return fmt.Sprintf("Unknown backend: %s\nAvailable: %s", arg, strings.Join(names, ", "))
-			}
-			st.Backend = arg
-			st.Model = ""
-		}
-		st.ThreadID = fmt.Sprintf("tg-%d", time.Now().Unix())
-		writeState(st)
-		return fmt.Sprintf("New %s session.", st.Backend)
+		return handleNew(arg, st, client, cfg)
 	case "model":
 		if arg == "" {
 			b := client.Backends[st.Backend]
@@ -355,12 +353,68 @@ func handleCommand(text string, client *oneagent.Client) string {
 			return fmt.Sprintf("Backend: %s\nModel: %s", st.Backend, model)
 		}
 		return switchModel(arg, st, client)
+	case "cwd":
+		return handleCWD(arg, st, cfg)
 	case "threads":
 		return handleThreads(arg, st, client)
 	case "compact":
 		return compactThread(st, client)
 	}
 	return ""
+}
+
+func handleNew(arg string, st State, client *oneagent.Client, cfg *Config) string {
+	for _, word := range strings.Fields(arg) {
+		if _, ok := client.Backends[word]; ok {
+			st.Backend = word
+			st.Model = ""
+		} else if path, ok := cfg.Workspaces[word]; ok {
+			st.CWD = path
+		} else {
+			return fmt.Sprintf("Unknown backend or workspace: %s", word)
+		}
+	}
+	st.ThreadID = fmt.Sprintf("tg-%d", time.Now().Unix())
+	writeState(st)
+	cwd := st.CWD
+	if cwd == "" {
+		cwd = "(default)"
+	}
+	return fmt.Sprintf("New %s session in %s.", st.Backend, cwd)
+}
+
+func handleCWD(arg string, st State, cfg *Config) string {
+	if arg == "" {
+		cwd := st.CWD
+		if cwd == "" {
+			cwd = "(default from --cwd flag)"
+		}
+		var buf strings.Builder
+		fmt.Fprintf(&buf, "CWD: %s\n\nWorkspaces:\n", cwd)
+		for name, path := range cfg.Workspaces {
+			fmt.Fprintf(&buf, "  %s → %s\n", name, path)
+		}
+		if len(cfg.Workspaces) == 0 {
+			buf.WriteString("  (none)\n")
+		}
+		buf.WriteString("\n/cwd <name> to switch\n/cwd <name> <path> to save")
+		return buf.String()
+	}
+	parts := strings.SplitN(arg, " ", 2)
+	if len(parts) == 2 {
+		name := parts[0]
+		path := strings.TrimSpace(parts[1])
+		cfg.Workspaces[name] = path
+		saveConfig(*cfg)
+		return fmt.Sprintf("Workspace %s → %s", name, path)
+	}
+	name := parts[0]
+	if path, ok := cfg.Workspaces[name]; ok {
+		st.CWD = path
+		writeState(st)
+		return fmt.Sprintf("CWD: %s (%s)", name, path)
+	}
+	return "Unknown workspace: " + name + "\n/cwd <name> <path> to create"
 }
 
 func switchModel(arg string, st State, client *oneagent.Client) string {
@@ -671,7 +725,7 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, client *oneagent
 
 // --- Update handler ---
 
-func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, client *oneagent.Client) {
+func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, client *oneagent.Client) {
 	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID {
 		writeCursor(u.ID)
 		return
@@ -679,7 +733,7 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, client *
 
 	text := u.Message.Text
 	if strings.HasPrefix(text, "/") {
-		if reply := handleCommand(text, client); reply != "" {
+		if reply := handleCommand(text, client, cfg); reply != "" {
 			sendChunked(bot, cfg.ChatID, reply)
 			writeCursor(u.ID)
 			return
@@ -700,6 +754,10 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg Config, cwd string, client *
 
 	log.Printf("message from %s: %s", senderName(u.Message.Sender), prompt)
 
+	cwd := readState().CWD
+	if cwd == "" {
+		cwd = defaultCWD
+	}
 	dispatch(prompt, cwd, bot, cfg.ChatID, client)
 	writeCursor(u.ID)
 }
@@ -710,7 +768,7 @@ func cmdServe() {
 		fatal("%v", err)
 	}
 
-	cwd := parseServeFlags()
+	defaultCWD := parseServeFlags()
 
 	backends, err := oneagent.LoadBackends("")
 	if err != nil {
@@ -729,7 +787,7 @@ func cmdServe() {
 	registerCommands(bot)
 
 	st := readState()
-	log.Printf("serving — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, cwd)
+	log.Printf("serving — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -743,7 +801,7 @@ func cmdServe() {
 		}
 
 		for _, u := range getUpdates(bot, cursorOffset(), 30) {
-			handleUpdate(u, bot, cfg, cwd, client)
+			handleUpdate(u, bot, &cfg, defaultCWD, client)
 		}
 	}
 }
