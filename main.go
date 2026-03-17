@@ -383,6 +383,14 @@ func handleNew(arg string, st State, client *oneagent.Client, cfg *Config) strin
 	return fmt.Sprintf("New %s session in %s.", st.Backend, cwd)
 }
 
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
 func handleCWD(arg string, st State, cfg *Config) string {
 	if arg == "" {
 		cwd := st.CWD
@@ -404,9 +412,10 @@ func handleCWD(arg string, st State, cfg *Config) string {
 	if len(parts) == 2 {
 		name := parts[0]
 		path := strings.TrimSpace(parts[1])
-		cfg.Workspaces[name] = path
+		resolved := expandHome(path)
+		cfg.Workspaces[name] = resolved
 		saveConfig(*cfg)
-		return fmt.Sprintf("Workspace %s → %s", name, path)
+		return fmt.Sprintf("Workspace %s → %s", name, resolved)
 	}
 	name := parts[0]
 	if path, ok := cfg.Workspaces[name]; ok {
@@ -502,7 +511,10 @@ func sendChunked(bot *tele.Bot, chatID int64, text string) {
 			text = ""
 		}
 		if _, err := bot.Send(tele.ChatID(chatID), chunk, tele.ModeHTML); err != nil {
-			log.Printf("send error: %v", err)
+			// Fallback to plain text if HTML parsing fails
+			if _, err2 := bot.Send(tele.ChatID(chatID), chunk); err2 != nil {
+				log.Printf("send error: %v", err2)
+			}
 		}
 	}
 }
