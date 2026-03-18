@@ -1,4 +1,4 @@
-module github.com/george/tele
+module github.com/1broseidon/moxie
 
 go 1.25.7
 
@@ -7,4 +7,4 @@ require (
 	gopkg.in/telebot.v4 v4.0.0-beta.7
 )
 
-require github.com/robfig/cron/v3 v3.0.1 // indirect
+require github.com/robfig/cron/v3 v3.0.1
