@@ -30,6 +30,19 @@ var (
 
 type PendingJob = store.PendingJob
 
+type sender interface {
+	Send(to tb.Recipient, what interface{}, opts ...interface{}) (*tb.Message, error)
+	Edit(msg tb.Editable, what interface{}, opts ...interface{}) (*tb.Message, error)
+	Delete(msg tb.Editable) error
+	Raw(method string, payload interface{}) ([]byte, error)
+}
+
+type fileSender interface {
+	sender
+	FileByID(fileID string) (tb.File, error)
+	File(file *tb.File) (io.ReadCloser, error)
+}
+
 func SenderName(u *tb.User) string {
 	return senderName(u)
 }
@@ -102,7 +115,7 @@ func renderActivityHTML(activity string) string {
 }
 
 type runningStatus struct {
-	bot *tb.Bot
+	bot sender
 	job *PendingJob
 }
 
@@ -148,7 +161,7 @@ func (s runningStatus) clear() {
 	store.WriteJob(*s.job)
 }
 
-func RegisterCommands(bot *tb.Bot) {
+func RegisterCommands(bot sender) {
 	cmds := []struct {
 		Command     string `json:"command"`
 		Description string `json:"description"`
@@ -196,11 +209,11 @@ func HandleCommand(text string, client *oneagent.Client, cfg *store.Config) stri
 
 func parseCommand(text string) (base, arg string) {
 	cmd := strings.TrimPrefix(text, "/")
-	if idx := strings.Index(cmd, "@"); idx >= 0 {
-		cmd = cmd[:idx]
-	}
 	parts := strings.SplitN(cmd, " ", 2)
 	base = parts[0]
+	if idx := strings.Index(base, "@"); idx >= 0 {
+		base = base[:idx]
+	}
 	if len(parts) > 1 {
 		arg = strings.TrimSpace(parts[1])
 	}
@@ -377,7 +390,7 @@ func SeedCursor(bot *tb.Bot, fetchUpdates func(*tb.Bot, int, int) []tb.Update) {
 	}
 }
 
-func SendChunked(bot *tb.Bot, chatID int64, text string) error {
+func SendChunked(bot sender, chatID int64, text string) error {
 	sentAny := false
 	var firstErr error
 
@@ -429,7 +442,7 @@ func SendChunked(bot *tb.Bot, chatID int64, text string) error {
 	return nil
 }
 
-func StartTyping(bot *tb.Bot, chatID int64) func() {
+func StartTyping(bot sender, chatID int64) func() {
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -447,7 +460,7 @@ func StartTyping(bot *tb.Bot, chatID int64) func() {
 	return func() { close(done) }
 }
 
-func BuildInboundPrompt(bot *tb.Bot, m *tb.Message) (string, string, error) {
+func BuildInboundPrompt(bot fileSender, m *tb.Message) (string, string, error) {
 	if m == nil {
 		return "", "", nil
 	}
@@ -483,7 +496,7 @@ func BuildInboundPrompt(bot *tb.Bot, m *tb.Message) (string, string, error) {
 	return promptpkg.FormatMediaPrompt(kind, path, m.Caption, fallback), path, nil
 }
 
-func SaveTelegramFile(bot *tb.Bot, file *tb.File, originalName, fallbackBase, defaultExt string) (string, error) {
+func SaveTelegramFile(bot fileSender, file *tb.File, originalName, fallbackBase, defaultExt string) (string, error) {
 	if file == nil || file.FileID == "" {
 		return "", fmt.Errorf("missing telegram file id")
 	}
@@ -552,7 +565,7 @@ func SplitResponseFiles(text string) ([]string, string) {
 	return paths, cleaned
 }
 
-func SendTaggedFiles(bot *tb.Bot, chatID int64, paths []string) []string {
+func SendTaggedFiles(bot sender, chatID int64, paths []string) []string {
 	failures := make([]string, 0)
 	for _, path := range paths {
 		if err := SendTaggedFile(bot, chatID, path); err != nil {
@@ -563,7 +576,7 @@ func SendTaggedFiles(bot *tb.Bot, chatID int64, paths []string) []string {
 	return failures
 }
 
-func SendTaggedFile(bot *tb.Bot, chatID int64, path string) error {
+func SendTaggedFile(bot sender, chatID int64, path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("empty file path")
@@ -589,7 +602,7 @@ func IsPhotoPath(path string) bool {
 	}
 }
 
-func DeliverJobResult(bot *tb.Bot, job *PendingJob) error {
+func DeliverJobResult(bot sender, job *PendingJob) error {
 	paths, text := SplitResponseFiles(job.Result)
 	failures := SendTaggedFiles(bot, job.ChatID, paths)
 	if len(failures) > 0 {
@@ -608,7 +621,7 @@ func DeliverJobResult(bot *tb.Bot, job *PendingJob) error {
 	return SendChunked(bot, job.ChatID, text)
 }
 
-func SendImmediate(bot *tb.Bot, chatID int64, text string) (int, bool) {
+func SendImmediate(bot sender, chatID int64, text string) (int, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return 0, true
@@ -632,7 +645,7 @@ func SendImmediate(bot *tb.Bot, chatID int64, text string) (int, bool) {
 	return job.UpdateID, delivered
 }
 
-func newTypingStopper(bot *tb.Bot, chatID int64, enabled bool) func() {
+func newTypingStopper(bot sender, chatID int64, enabled bool) func() {
 	if !enabled {
 		return func() {}
 	}
@@ -643,7 +656,7 @@ func newTypingStopper(bot *tb.Bot, chatID int64, enabled bool) func() {
 	}
 }
 
-func telegramDispatchCallbacks(bot *tb.Bot, job *PendingJob, stopTyping func()) dispatch.Callbacks {
+func telegramDispatchCallbacks(bot sender, job *PendingJob, stopTyping func()) dispatch.Callbacks {
 	status := runningStatus{bot: bot, job: job}
 	if stopTyping == nil {
 		stopTyping = func() {}
@@ -665,26 +678,26 @@ func telegramDispatchCallbacks(bot *tb.Bot, job *PendingJob, stopTyping func()) 
 	}
 }
 
-func ProcessJob(job PendingJob, bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store) {
+func ProcessJob(job PendingJob, bot sender, client *oneagent.Client, schedules *scheduler.Store) {
 	stopTyping := newTypingStopper(bot, job.ChatID, job.Status != "ready" && job.Status != "delivered")
 	dispatch.ProcessJob(&job, client, schedules, telegramDispatchCallbacks(bot, &job, stopTyping))
 }
 
-func RecoverPendingJobs(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store) bool {
+func RecoverPendingJobs(bot sender, client *oneagent.Client, schedules *scheduler.Store) bool {
 	return dispatch.RecoverPendingJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		stopTyping := newTypingStopper(bot, job.ChatID, job.Status != "ready" && job.Status != "delivered")
 		return telegramDispatchCallbacks(bot, job, stopTyping)
 	})
 }
 
-func RetryDeliverableJobs(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store) bool {
+func RetryDeliverableJobs(bot sender, client *oneagent.Client, schedules *scheduler.Store) bool {
 	return dispatch.RetryDeliverableJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		stopTyping := newTypingStopper(bot, job.ChatID, job.Status != "ready" && job.Status != "delivered")
 		return telegramDispatchCallbacks(bot, job, stopTyping)
 	})
 }
 
-func HandleUpdate(u tb.Update, bot *tb.Bot, cfg *store.Config, defaultCWD string, st store.State, client *oneagent.Client) {
+func HandleUpdate(u tb.Update, bot fileSender, cfg *store.Config, defaultCWD string, st store.State, client *oneagent.Client) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("panic in handleUpdate: %v", r)

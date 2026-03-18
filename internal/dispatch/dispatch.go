@@ -16,6 +16,7 @@ import (
 var (
 	dispatchMu   sync.Mutex
 	shuttingDown atomic.Bool
+	runModelFunc = RunModel
 )
 
 type Callbacks struct {
@@ -77,7 +78,7 @@ func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	if job.Status != "ready" && job.Status != "delivered" {
 		job.Status = "running"
 		store.WriteJob(*job)
-		result, interrupted := RunModel(job, client, callbacks.OnActivity)
+		result, interrupted := runModelFunc(job, client, callbacks.OnActivity)
 		if interrupted {
 			return
 		}

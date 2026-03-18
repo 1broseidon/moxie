@@ -31,6 +31,14 @@ func ConfigDir() string {
 	return cfgDir
 }
 
+func SetConfigDir(dir string) func() {
+	prev := cfgDir
+	cfgDir = dir
+	return func() {
+		cfgDir = prev
+	}
+}
+
 func LoadConfig() (Config, error) {
 	var cfg Config
 	if err := ReadJSON("config.json", &cfg); err != nil {
