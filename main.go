@@ -3,14 +3,17 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,7 +33,10 @@ var cfgDir string
 
 func configDir() string {
 	if cfgDir == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fatal("cannot determine home directory: %v", err)
+		}
 		cfgDir = filepath.Join(home, ".config", "tele")
 	}
 	return cfgDir
@@ -41,6 +47,12 @@ func loadConfig() (Config, error) {
 	if err := readJSON("config.json", &cfg); err != nil {
 		return Config{}, fmt.Errorf("config not found: %w\nRun: tele init", err)
 	}
+	if cfg.Token == "" {
+		return Config{}, fmt.Errorf("config missing token\nRun: tele init")
+	}
+	if cfg.ChatID == 0 {
+		return Config{}, fmt.Errorf("config missing chat_id\nRun: tele init")
+	}
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = map[string]string{}
 	}
@@ -48,8 +60,9 @@ func loadConfig() (Config, error) {
 }
 
 func saveConfig(cfg Config) {
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(configFile("config.json"), data, 0600)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	check(err)
+	check(os.WriteFile(configFile("config.json"), data, 0600))
 }
 
 // --- Tele state (backend + model selection) ---
@@ -59,6 +72,20 @@ type State struct {
 	Model    string `json:"model,omitempty"`
 	ThreadID string `json:"thread_id,omitempty"`
 	CWD      string `json:"cwd,omitempty"`
+}
+
+type PendingJob struct {
+	UpdateID          int       `json:"update_id"`
+	ChatID            int64     `json:"chat_id"`
+	Prompt            string    `json:"prompt"`
+	CWD               string    `json:"cwd,omitempty"`
+	TempPath          string    `json:"temp_path,omitempty"`
+	StatusMessageID   int       `json:"status_message_id,omitempty"`
+	StatusMessageHTML string    `json:"status_message_html,omitempty"`
+	State             State     `json:"state"`
+	Status            string    `json:"status"`
+	Result            string    `json:"result,omitempty"`
+	Updated           time.Time `json:"updated"`
 }
 
 func configFile(name string) string {
@@ -74,8 +101,9 @@ func readJSON(name string, v any) error {
 }
 
 func writeJSON(name string, v any) {
-	data, _ := json.Marshal(v)
-	os.WriteFile(configFile(name), data, 0600)
+	data, err := json.Marshal(v)
+	check(err)
+	check(os.WriteFile(configFile(name), data, 0600))
 }
 
 func readState() State {
@@ -92,6 +120,68 @@ func readState() State {
 
 func writeState(s State) { writeJSON("state.json", s) }
 
+func jobsDir() string {
+	return filepath.Join(configDir(), "jobs")
+}
+
+func jobFile(updateID int) string {
+	return filepath.Join(jobsDir(), strconv.Itoa(updateID)+".json")
+}
+
+func writeJob(job PendingJob) {
+	job.Updated = time.Now()
+	check(os.MkdirAll(jobsDir(), 0700))
+	data, err := json.Marshal(job)
+	check(err)
+	check(os.WriteFile(jobFile(job.UpdateID), data, 0600))
+}
+
+func removeJob(updateID int) {
+	err := os.Remove(jobFile(updateID))
+	if err != nil && !os.IsNotExist(err) {
+		log.Printf("error: remove job %d: %v", updateID, err)
+	}
+}
+
+func cleanupJobTemp(job PendingJob) {
+	if job.TempPath == "" {
+		return
+	}
+	if err := os.Remove(job.TempPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("temp file cleanup error for %s: %v", job.TempPath, err)
+	}
+}
+
+func listJobs() []PendingJob {
+	entries, err := os.ReadDir(jobsDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		log.Printf("error: read jobs dir: %v", err)
+		return nil
+	}
+	jobs := make([]PendingJob, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(jobsDir(), entry.Name()))
+		if err != nil {
+			log.Printf("error: read job %s: %v", entry.Name(), err)
+			continue
+		}
+		var job PendingJob
+		if err := json.Unmarshal(data, &job); err != nil {
+			log.Printf("error: parse job %s: %v", entry.Name(), err)
+			continue
+		}
+		jobs = append(jobs, job)
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].UpdateID < jobs[j].UpdateID })
+	return jobs
+}
+
 // --- Cursor (Telegram update offset) ---
 
 func cursorOffset() int {
@@ -106,12 +196,16 @@ func readCursor() int {
 	if err != nil {
 		return 0
 	}
-	n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		log.Printf("corrupt cursor file, resetting: %v", err)
+		return 0
+	}
 	return n
 }
 
 func writeCursor(id int) {
-	os.WriteFile(configFile("cursor"), []byte(strconv.Itoa(id)), 0600)
+	check(os.WriteFile(configFile("cursor"), []byte(strconv.Itoa(id)), 0600))
 }
 
 // --- Helpers ---
@@ -134,6 +228,7 @@ To send a local file back to Telegram, include <send>/absolute/path/to/file</sen
 var (
 	sendTagPattern  = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
 	unsafeFileChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+	shuttingDown    atomic.Bool
 )
 
 func injectSystemPrompt(client *oneagent.Client) {
@@ -145,6 +240,115 @@ func injectSystemPrompt(client *oneagent.Client) {
 
 func newBot(cfg Config) (*tele.Bot, error) {
 	return tele.NewBot(tele.Settings{Token: cfg.Token})
+}
+
+func check(err error) {
+	if err != nil {
+		log.Printf("error: %v", err)
+	}
+}
+
+func isShutdownError(errText string) bool {
+	errText = strings.ToLower(errText)
+	return strings.Contains(errText, "signal: terminated") ||
+		strings.Contains(errText, "context canceled") ||
+		strings.Contains(errText, "interrupted by signal")
+}
+
+func compactText(text string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func truncateRunes(text string, max int) string {
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return strings.TrimSpace(string(runes[:max-1])) + "…"
+}
+
+func renderActivityHTML(activity string) string {
+	activity = compactText(activity)
+	if activity == "" {
+		return "<i>Working…</i>"
+	}
+
+	words := strings.Fields(activity)
+	verb := strings.ToLower(words[0])
+	detail := ""
+	if len(words) > 1 {
+		detail = strings.Join(words[1:], " ")
+	}
+
+	summary := "Working…"
+	switch verb {
+	case "read":
+		summary = "Reading files…"
+	case "write":
+		summary = "Writing files…"
+	case "edit", "patch":
+		summary = "Editing files…"
+	case "bash", "sh", "zsh":
+		summary = "Running command…"
+	case "rg", "grep", "find", "ls", "glob":
+		summary = "Searching…"
+		detail = activity
+	default:
+		detail = activity
+	}
+
+	msg := "<i>" + html.EscapeString(summary) + "</i>"
+	if detail != "" {
+		msg += "\n<code>" + html.EscapeString(truncateRunes(detail, 140)) + "</code>"
+	}
+	return msg
+}
+
+type runningStatus struct {
+	bot *tele.Bot
+	job *PendingJob
+}
+
+func (s runningStatus) show(activity string) {
+	text := renderActivityHTML(activity)
+	if text == s.job.StatusMessageHTML {
+		return
+	}
+
+	if s.job.StatusMessageID == 0 {
+		msg, err := s.bot.Send(tele.ChatID(s.job.ChatID), text, tele.ModeHTML)
+		if err != nil {
+			log.Printf("status send error: %v", err)
+			return
+		}
+		s.job.StatusMessageID = msg.ID
+		s.job.StatusMessageHTML = text
+		writeJob(*s.job)
+		return
+	}
+
+	stored := tele.StoredMessage{MessageID: strconv.Itoa(s.job.StatusMessageID), ChatID: s.job.ChatID}
+	if _, err := s.bot.Edit(stored, text, tele.ModeHTML); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
+			return
+		}
+		log.Printf("status edit error for %d: %v", s.job.StatusMessageID, err)
+		return
+	}
+	s.job.StatusMessageHTML = text
+	writeJob(*s.job)
+}
+
+func (s runningStatus) clear() {
+	if s.job.StatusMessageID != 0 {
+		stored := tele.StoredMessage{MessageID: strconv.Itoa(s.job.StatusMessageID), ChatID: s.job.ChatID}
+		if err := s.bot.Delete(stored); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
+			log.Printf("status delete error for %d: %v", s.job.StatusMessageID, err)
+		}
+	}
+	s.job.StatusMessageID = 0
+	s.job.StatusMessageHTML = ""
+	writeJob(*s.job)
 }
 
 func fatal(format string, args ...any) {
@@ -199,7 +403,9 @@ Usage:
 
 func cmdInit() {
 	dir := configDir()
-	os.MkdirAll(dir, 0700)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		fatal("failed to create config dir: %v", err)
+	}
 
 	var token string
 	var chatID int64
@@ -209,8 +415,18 @@ func cmdInit() {
 	fmt.Print("Chat ID: ")
 	fmt.Scanln(&chatID)
 
+	if token == "" {
+		fatal("token cannot be empty")
+	}
+	if chatID == 0 {
+		fatal("chat ID cannot be zero")
+	}
+
 	cfg := Config{Token: token, ChatID: chatID}
-	data, _ := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		fatal("failed to marshal config: %v", err)
+	}
 
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -312,7 +528,8 @@ func registerCommands(bot *tele.Bot) {
 		{"threads", "List saved threads"},
 		{"compact", "Summarize old thread turns"},
 	}
-	data, _ := json.Marshal(map[string]any{"commands": cmds})
+	data, err := json.Marshal(map[string]any{"commands": cmds})
+	check(err)
 	bot.Raw("setMyCommands", json.RawMessage(data))
 }
 
@@ -327,6 +544,15 @@ func parseCommand(text string) (base, arg string) {
 		arg = strings.TrimSpace(parts[1])
 	}
 	return
+}
+
+func isSupportedCommand(name string) bool {
+	switch name {
+	case "new", "model", "cwd", "threads", "compact":
+		return true
+	default:
+		return false
+	}
 }
 
 func handleCommand(text string, client *oneagent.Client, cfg *Config) string {
@@ -365,7 +591,15 @@ func handleNew(arg string, st State, client *oneagent.Client, cfg *Config) strin
 			st.Backend = word
 			st.Model = ""
 		} else if path, ok := cfg.Workspaces[word]; ok {
-			st.CWD = path
+			resolved, err := resolveDir(path)
+			if err != nil {
+				return fmt.Sprintf("Workspace %s is invalid: %v", word, err)
+			}
+			if path != resolved {
+				cfg.Workspaces[word] = resolved
+				saveConfig(*cfg)
+			}
+			st.CWD = resolved
 		} else {
 			return fmt.Sprintf("Unknown backend or workspace: %s", word)
 		}
@@ -381,10 +615,34 @@ func handleNew(arg string, st State, client *oneagent.Client, cfg *Config) strin
 
 func expandHome(path string) string {
 	if strings.HasPrefix(path, "~/") {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			log.Printf("error: cannot expand ~: %v", err)
+			return path
+		}
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+func resolveDir(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+	resolved := expandHome(path)
+	abs, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve path: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("access path: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("not a directory: %s", abs)
+	}
+	return abs, nil
 }
 
 func handleCWD(arg string, st State, cfg *Config) string {
@@ -406,16 +664,29 @@ func handleCWD(arg string, st State, cfg *Config) string {
 	}
 	parts := strings.SplitN(arg, " ", 2)
 	if len(parts) == 2 {
-		name := parts[0]
-		path := strings.TrimSpace(parts[1])
-		resolved := expandHome(path)
+		name := strings.TrimSpace(parts[0])
+		if name == "" {
+			return "Workspace name cannot be empty."
+		}
+		resolved, err := resolveDir(parts[1])
+		if err != nil {
+			return "Invalid workspace path: " + err.Error()
+		}
 		cfg.Workspaces[name] = resolved
 		saveConfig(*cfg)
 		return fmt.Sprintf("Workspace %s → %s", name, resolved)
 	}
-	name := parts[0]
+	name := strings.TrimSpace(parts[0])
 	if path, ok := cfg.Workspaces[name]; ok {
-		st.CWD = expandHome(path)
+		resolved, err := resolveDir(path)
+		if err != nil {
+			return fmt.Sprintf("Workspace %s is invalid: %v", name, err)
+		}
+		if path != resolved {
+			cfg.Workspaces[name] = resolved
+			saveConfig(*cfg)
+		}
+		st.CWD = resolved
 		writeState(st)
 		return fmt.Sprintf("CWD: %s (%s)", name, st.CWD)
 	}
@@ -539,12 +810,12 @@ func startTyping(bot *tele.Bot, chatID int64) func() {
 	return func() { close(done) }
 }
 
-func buildInboundPrompt(bot *tele.Bot, m *tele.Message) (string, error) {
+func buildInboundPrompt(bot *tele.Bot, m *tele.Message) (string, string, error) {
 	if m == nil {
-		return "", nil
+		return "", "", nil
 	}
 	if m.Text != "" {
-		return m.Text, nil
+		return m.Text, "", nil
 	}
 
 	var file *tele.File
@@ -561,18 +832,18 @@ func buildInboundPrompt(bot *tele.Bot, m *tele.Message) (string, error) {
 		file, base, ext = m.Voice.MediaFile(), "voice", ".ogg"
 		kind, fallback = "a voice message", "User sent a voice message"
 	default:
-		return "", nil
+		return "", "", nil
 	}
 
 	path, err := saveTelegramFile(bot, file, origName, base, ext)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if origName != "" {
 		kind = "a file (" + origName + ")"
 		fallback = "User sent file: " + origName
 	}
-	return formatMediaPrompt(kind, path, m.Caption, fallback), nil
+	return formatMediaPrompt(kind, path, m.Caption, fallback), path, nil
 }
 
 func saveTelegramFile(bot *tele.Bot, file *tele.File, originalName, fallbackBase, defaultExt string) (string, error) {
@@ -691,36 +962,41 @@ func isPhotoPath(path string) bool {
 
 // --- Dispatch via oneagent ---
 
-func dispatch(message, cwd string, bot *tele.Bot, chatID int64, st State, client *oneagent.Client) {
+func runModel(job *PendingJob, bot *tele.Bot, client *oneagent.Client, status runningStatus) (string, bool) {
 	opts := oneagent.RunOpts{
-		Backend:  st.Backend,
-		Prompt:   message,
-		Model:    st.Model,
-		CWD:      cwd,
-		ThreadID: st.ThreadID,
+		Backend:  job.State.Backend,
+		Prompt:   job.Prompt,
+		Model:    job.State.Model,
+		CWD:      job.CWD,
+		ThreadID: job.State.ThreadID,
 		Source:   "telegram",
 	}
 
-	stop := startTyping(bot, chatID)
+	stop := startTyping(bot, job.ChatID)
+	defer stop()
 
 	emit := func(ev oneagent.StreamEvent) {
 		if ev.Type == "activity" && ev.Activity != "" {
-			log.Printf("[%s] %s", st.Backend, ev.Activity)
+			log.Printf("[%s] %s", job.State.Backend, ev.Activity)
+			status.show(ev.Activity)
 		}
 	}
 
 	resp := client.RunWithThreadStream(opts, emit)
-	stop()
-
 	if resp.Error != "" {
-		log.Printf("%s error: %s", st.Backend, resp.Error)
-		sendChunked(bot, chatID, resp.Error)
-		return
+		if shuttingDown.Load() && isShutdownError(resp.Error) {
+			log.Printf("%s interrupted by shutdown: %s", job.State.Backend, resp.Error)
+			return "", true
+		}
+		log.Printf("%s error: %s", job.State.Backend, resp.Error)
+		return resp.Error, false
 	}
+	return resp.Result, false
+}
 
-	result := resp.Result
-	paths, text := splitResponseFiles(result)
-	failures := sendTaggedFiles(bot, chatID, paths)
+func deliverJobResult(bot *tele.Bot, job PendingJob) {
+	paths, text := splitResponseFiles(job.Result)
+	failures := sendTaggedFiles(bot, job.ChatID, paths)
 	if len(failures) > 0 {
 		if text != "" {
 			text += "\n\n" + strings.Join(failures, "\n")
@@ -734,25 +1010,109 @@ func dispatch(message, cwd string, bot *tele.Bot, chatID int64, st State, client
 	if text == "" {
 		return
 	}
-	sendChunked(bot, chatID, text)
+	sendChunked(bot, job.ChatID, text)
+}
+
+func processJob(job PendingJob, bot *tele.Bot, client *oneagent.Client) {
+	status := runningStatus{bot: bot, job: &job}
+	if job.Status != "ready" {
+		job.Status = "running"
+		writeJob(job)
+		result, interrupted := runModel(&job, bot, client, status)
+		if interrupted {
+			return
+		}
+		job.Result = result
+		job.Status = "ready"
+		writeJob(job)
+	}
+	status.clear()
+	deliverJobResult(bot, job)
+	cleanupJobTemp(job)
+	removeJob(job.UpdateID)
+}
+
+func canRetryJob(job PendingJob) bool {
+	if job.TempPath == "" {
+		return true
+	}
+	if _, err := os.Stat(job.TempPath); err == nil {
+		return true
+	} else if os.IsNotExist(err) {
+		log.Printf("cannot retry job %d: missing temp file %s", job.UpdateID, job.TempPath)
+	} else {
+		log.Printf("cannot retry job %d: temp file check failed for %s: %v", job.UpdateID, job.TempPath, err)
+	}
+	return false
+}
+
+func recoverPendingJobs(bot *tele.Bot, client *oneagent.Client) bool {
+	jobs := listJobs()
+	if len(jobs) == 0 {
+		return false
+	}
+	log.Printf("recovering %d pending job(s)", len(jobs))
+	maxRecovered := 0
+	for _, job := range jobs {
+		switch job.Status {
+		case "ready":
+			log.Printf("replaying ready job %d", job.UpdateID)
+			processJob(job, bot, client)
+			if job.UpdateID > maxRecovered {
+				maxRecovered = job.UpdateID
+			}
+		case "running":
+			if !canRetryJob(job) {
+				log.Printf("discarding interrupted job %d; update will be retried", job.UpdateID)
+				cleanupJobTemp(job)
+				removeJob(job.UpdateID)
+				continue
+			}
+			log.Printf("retrying interrupted job %d", job.UpdateID)
+			processJob(job, bot, client)
+			if job.UpdateID > maxRecovered {
+				maxRecovered = job.UpdateID
+			}
+		default:
+			log.Printf("discarding unknown job state %q for %d", job.Status, job.UpdateID)
+			cleanupJobTemp(job)
+			removeJob(job.UpdateID)
+		}
+	}
+	if maxRecovered > readCursor() {
+		writeCursor(maxRecovered)
+	}
+	return true
 }
 
 // --- Update handler ---
 
 func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, st State, client *oneagent.Client) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("panic in handleUpdate: %v", r)
+			sendChunked(bot, cfg.ChatID, "Internal error — bot recovered.")
+		}
+	}()
+
 	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID {
 		return
 	}
 
 	text := u.Message.Text
 	if strings.HasPrefix(text, "/") {
-		if reply := handleCommand(text, client, cfg); reply != "" {
-			sendChunked(bot, cfg.ChatID, reply)
+		base, _ := parseCommand(text)
+		if !isSupportedCommand(base) {
+			sendChunked(bot, cfg.ChatID, "Unknown command. Try /new, /model, /cwd, /threads, or /compact.")
 			return
 		}
+		if reply := handleCommand(text, client, cfg); reply != "" {
+			sendChunked(bot, cfg.ChatID, reply)
+		}
+		return
 	}
 
-	prompt, err := buildInboundPrompt(bot, u.Message)
+	prompt, tempPath, err := buildInboundPrompt(bot, u.Message)
 	if err != nil {
 		log.Printf("message processing error: %v", err)
 		sendChunked(bot, cfg.ChatID, "Failed to process the incoming media.")
@@ -768,7 +1128,14 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, 
 	if cwd == "" {
 		cwd = defaultCWD
 	}
-	dispatch(prompt, cwd, bot, cfg.ChatID, st, client)
+	processJob(PendingJob{
+		UpdateID: u.ID,
+		ChatID:   cfg.ChatID,
+		Prompt:   prompt,
+		CWD:      cwd,
+		TempPath: tempPath,
+		State:    st,
+	}, bot, client)
 }
 
 func cmdServe() {
@@ -778,6 +1145,12 @@ func cmdServe() {
 	}
 
 	defaultCWD := parseServeFlags()
+	if defaultCWD != "" {
+		defaultCWD, err = resolveDir(defaultCWD)
+		if err != nil {
+			fatal("invalid --cwd: %v", err)
+		}
+	}
 
 	backends, err := oneagent.LoadBackends("")
 	if err != nil {
@@ -792,7 +1165,10 @@ func cmdServe() {
 		fatal("bot init failed: %v", err)
 	}
 
-	seedCursor(bot)
+	hadPendingJobs := recoverPendingJobs(bot, client)
+	if !hadPendingJobs {
+		seedCursor(bot)
+	}
 	registerCommands(bot)
 
 	cursor := readCursor()
@@ -801,6 +1177,11 @@ func cmdServe() {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		shuttingDown.Store(true)
+		log.Println("shutdown requested; draining current work")
+	}()
 
 	offset := func() int {
 		if cursor > 0 {
@@ -809,21 +1190,23 @@ func cmdServe() {
 		return 0
 	}
 
-	for {
-		select {
-		case <-sig:
-			log.Println("shutting down")
-			return
-		default:
-		}
-
+	for !shuttingDown.Load() {
 		for _, u := range getUpdates(bot, offset(), 30) {
+			if shuttingDown.Load() {
+				log.Println("shutting down")
+				return
+			}
 			st = readState()
 			handleUpdate(u, bot, &cfg, defaultCWD, st, client)
 			cursor = u.ID
 			writeCursor(cursor)
+			if shuttingDown.Load() {
+				log.Println("shutting down")
+				return
+			}
 		}
 	}
+	log.Println("shutting down")
 }
 
 // --- Message display (for CLI subcommands) ---
@@ -884,7 +1267,8 @@ func printMessages(msgs []msgInfo, format string) {
 
 	switch format {
 	case "json":
-		out, _ := json.MarshalIndent(msgs, "", "  ")
+		out, err := json.MarshalIndent(msgs, "", "  ")
+		check(err)
 		fmt.Println(string(out))
 	case "raw":
 		for _, m := range msgs {
