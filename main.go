@@ -579,6 +579,58 @@ Notes:
   Dispatch schedules capture backend/model/thread/cwd at creation time unless overridden`)
 }
 
+func mustScheduleTrigger(in, at, cronSpec string) scheduler.Trigger {
+	count := 0
+	trigger := scheduler.TriggerAt
+	if strings.TrimSpace(in) != "" {
+		count++
+	}
+	if strings.TrimSpace(at) != "" {
+		count++
+	}
+	if strings.TrimSpace(cronSpec) != "" {
+		count++
+		trigger = scheduler.TriggerCron
+	}
+	if count == 0 {
+		fatal("missing schedule trigger: use --in, --at, or --cron")
+	}
+	if count > 1 {
+		fatal("use exactly one of --in, --at, or --cron")
+	}
+	return trigger
+}
+
+func applyScheduleAddOverrides(input *scheduler.AddInput, backend, model, thread, cwd string) {
+	if trimmed := strings.TrimSpace(backend); trimmed != "" {
+		input.Backend = trimmed
+	}
+	if trimmed := strings.TrimSpace(model); trimmed != "" {
+		input.Model = trimmed
+	}
+	if trimmed := strings.TrimSpace(thread); trimmed != "" {
+		input.ThreadID = trimmed
+	}
+	if strings.TrimSpace(cwd) == "" {
+		return
+	}
+	resolved, err := resolveDir(cwd)
+	if err != nil {
+		fatal("invalid --cwd: %v", err)
+	}
+	input.CWD = resolved
+}
+
+func applyScheduleActionDefaults(input *scheduler.AddInput) {
+	if input.Action != scheduler.ActionSend {
+		return
+	}
+	input.Backend = ""
+	input.Model = ""
+	input.ThreadID = ""
+	input.CWD = ""
+}
+
 func cmdScheduleAdd(store *scheduler.Store, args []string) {
 	fs := flag.NewFlagSet("schedule add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -600,27 +652,9 @@ func cmdScheduleAdd(store *scheduler.Store, args []string) {
 		fatal("unexpected schedule add args: %s", strings.Join(fs.Args(), " "))
 	}
 
-	var trigger scheduler.Trigger
-	switch {
-	case *in != "" && *at != "":
-		fatal("use exactly one of --in, --at, or --cron")
-	case *in != "" && *cronSpec != "":
-		fatal("use exactly one of --in, --at, or --cron")
-	case *at != "" && *cronSpec != "":
-		fatal("use exactly one of --in, --at, or --cron")
-	case *in != "":
-		trigger = scheduler.TriggerAt
-	case *at != "":
-		trigger = scheduler.TriggerAt
-	case *cronSpec != "":
-		trigger = scheduler.TriggerCron
-	default:
-		fatal("missing schedule trigger: use --in, --at, or --cron")
-	}
-
 	state := readState()
 	input := scheduler.AddInput{
-		Trigger:  trigger,
+		Trigger:  mustScheduleTrigger(*in, *at, *cronSpec),
 		Action:   scheduler.Action(strings.TrimSpace(*action)),
 		In:       *in,
 		At:       *at,
@@ -631,30 +665,8 @@ func cmdScheduleAdd(store *scheduler.Store, args []string) {
 		ThreadID: state.ThreadID,
 		CWD:      state.CWD,
 	}
-
-	if strings.TrimSpace(*backendFlag) != "" {
-		input.Backend = strings.TrimSpace(*backendFlag)
-	}
-	if strings.TrimSpace(*modelFlag) != "" {
-		input.Model = strings.TrimSpace(*modelFlag)
-	}
-	if strings.TrimSpace(*threadFlag) != "" {
-		input.ThreadID = strings.TrimSpace(*threadFlag)
-	}
-	if strings.TrimSpace(*cwdFlag) != "" {
-		resolved, err := resolveDir(*cwdFlag)
-		if err != nil {
-			fatal("invalid --cwd: %v", err)
-		}
-		input.CWD = resolved
-	}
-
-	if input.Action == scheduler.ActionSend {
-		input.Backend = ""
-		input.Model = ""
-		input.ThreadID = ""
-		input.CWD = ""
-	}
+	applyScheduleAddOverrides(&input, *backendFlag, *modelFlag, *threadFlag, *cwdFlag)
+	applyScheduleActionDefaults(&input)
 
 	sc, err := store.Add(input)
 	if err != nil {
