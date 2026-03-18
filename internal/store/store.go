@@ -8,14 +8,25 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 )
 
 type Config struct {
-	Token      string            `json:"token"`
-	ChatID     int64             `json:"chat_id"`
-	Workspaces map[string]string `json:"workspaces,omitempty"`
+	Channels   map[string]ChannelConfig `json:"channels,omitempty"`
+	Workspaces map[string]string        `json:"workspaces,omitempty"`
+}
+
+type ChannelConfig struct {
+	Provider  string `json:"provider"`
+	Token     string `json:"token,omitempty"`
+	ChannelID string `json:"channel_id,omitempty"`
+}
+
+type configFile struct {
+	Channels   map[string]ChannelConfig `json:"channels,omitempty"`
+	Workspaces map[string]string        `json:"workspaces,omitempty"`
+	Token      string                   `json:"token,omitempty"`
+	ChatID     int64                    `json:"chat_id,omitempty"`
 }
 
 var cfgDir string
@@ -40,26 +51,57 @@ func SetConfigDir(dir string) func() {
 }
 
 func LoadConfig() (Config, error) {
-	var cfg Config
-	if err := ReadJSON("config.json", &cfg); err != nil {
+	var file configFile
+	if err := ReadJSON("config.json", &file); err != nil {
 		return Config{}, fmt.Errorf("config not found: %w\nRun: moxie init", err)
 	}
-	if cfg.Token == "" {
-		return Config{}, fmt.Errorf("config missing token\nRun: moxie init")
-	}
-	if cfg.ChatID == 0 {
-		return Config{}, fmt.Errorf("config missing chat_id\nRun: moxie init")
+	cfg := Config{
+		Channels:   file.Channels,
+		Workspaces: file.Workspaces,
 	}
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = map[string]string{}
+	}
+	if cfg.Channels == nil {
+		cfg.Channels = map[string]ChannelConfig{}
+	}
+	if len(cfg.Channels) == 0 && file.Token != "" && file.ChatID != 0 {
+		cfg.Channels["telegram"] = ChannelConfig{
+			Provider:  "telegram",
+			Token:     file.Token,
+			ChannelID: fmt.Sprintf("%d", file.ChatID),
+		}
+	}
+	if _, err := cfg.Telegram(); err != nil {
+		return Config{}, fmt.Errorf("%w\nRun: moxie init", err)
 	}
 	return cfg, nil
 }
 
 func SaveConfig(cfg Config) {
+	if cfg.Channels == nil {
+		cfg.Channels = map[string]ChannelConfig{}
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	Check(err)
 	Check(os.WriteFile(ConfigFile("config.json"), data, 0600))
+}
+
+func (cfg Config) Telegram() (ChannelConfig, error) {
+	tg, ok := cfg.Channels["telegram"]
+	if !ok {
+		return ChannelConfig{}, fmt.Errorf("config missing telegram channel")
+	}
+	if tg.Provider == "" {
+		tg.Provider = "telegram"
+	}
+	if tg.Token == "" {
+		return ChannelConfig{}, fmt.Errorf("config missing telegram token")
+	}
+	if tg.ChannelID == "" {
+		return ChannelConfig{}, fmt.Errorf("config missing telegram channel_id")
+	}
+	return tg, nil
 }
 
 type State struct {
@@ -70,18 +112,18 @@ type State struct {
 }
 
 type PendingJob struct {
-	UpdateID          int       `json:"update_id"`
-	ScheduleID        string    `json:"schedule_id,omitempty"`
-	ChatID            int64     `json:"chat_id"`
-	Prompt            string    `json:"prompt"`
-	CWD               string    `json:"cwd,omitempty"`
-	TempPath          string    `json:"temp_path,omitempty"`
-	StatusMessageID   int       `json:"status_message_id,omitempty"`
-	StatusMessageHTML string    `json:"status_message_html,omitempty"`
-	State             State     `json:"state"`
-	Status            string    `json:"status"`
-	Result            string    `json:"result,omitempty"`
-	Updated           time.Time `json:"updated"`
+	ID             string    `json:"id"`
+	SourceEventID  string    `json:"source_event_id,omitempty"`
+	ScheduleID     string    `json:"schedule_id,omitempty"`
+	ConversationID string    `json:"conversation_id"`
+	Source         string    `json:"source,omitempty"`
+	Prompt         string    `json:"prompt"`
+	CWD            string    `json:"cwd,omitempty"`
+	TempPath       string    `json:"temp_path,omitempty"`
+	State          State     `json:"state"`
+	Status         string    `json:"status"`
+	Result         string    `json:"result,omitempty"`
+	Updated        time.Time `json:"updated"`
 }
 
 func ConfigFile(name string) string {
@@ -109,7 +151,7 @@ func ReadState() State {
 		s.Backend = "claude"
 	}
 	if s.ThreadID == "" {
-		s.ThreadID = "telegram"
+		s.ThreadID = "chat"
 	}
 	return s
 }
@@ -120,27 +162,30 @@ func JobsDir() string {
 	return filepath.Join(ConfigDir(), "jobs")
 }
 
-func JobFile(updateID int) string {
-	return filepath.Join(JobsDir(), strconv.Itoa(updateID)+".json")
+func JobFile(jobID string) string {
+	return filepath.Join(JobsDir(), jobID+".json")
 }
 
 func WriteJob(job PendingJob) {
+	if job.ID == "" {
+		job.ID = NewJobID()
+	}
 	job.Updated = time.Now()
 	Check(os.MkdirAll(JobsDir(), 0700))
 	data, err := json.Marshal(job)
 	Check(err)
-	Check(os.WriteFile(JobFile(job.UpdateID), data, 0600))
+	Check(os.WriteFile(JobFile(job.ID), data, 0600))
 }
 
-func RemoveJob(updateID int) {
-	err := os.Remove(JobFile(updateID))
+func RemoveJob(jobID string) {
+	err := os.Remove(JobFile(jobID))
 	if err != nil && !os.IsNotExist(err) {
-		log.Printf("error: remove job %d: %v", updateID, err)
+		log.Printf("error: remove job %s: %v", jobID, err)
 	}
 }
 
-func JobExists(updateID int) bool {
-	_, err := os.Stat(JobFile(updateID))
+func JobExists(jobID string) bool {
+	_, err := os.Stat(JobFile(jobID))
 	return err == nil
 }
 
@@ -179,32 +224,22 @@ func ListJobs() []PendingJob {
 		}
 		jobs = append(jobs, job)
 	}
-	sort.Slice(jobs, func(i, j int) bool { return jobs[i].UpdateID < jobs[j].UpdateID })
+	sort.Slice(jobs, func(i, j int) bool {
+		iID, iErr := strconv.Atoi(jobs[i].SourceEventID)
+		jID, jErr := strconv.Atoi(jobs[j].SourceEventID)
+		if iErr == nil && jErr == nil && jobs[i].Source != "" && jobs[i].Source == jobs[j].Source {
+			return iID < jID
+		}
+		if jobs[i].Updated.Equal(jobs[j].Updated) {
+			return jobs[i].ID < jobs[j].ID
+		}
+		return jobs[i].Updated.Before(jobs[j].Updated)
+	})
 	return jobs
 }
 
-func CursorOffset() int {
-	if c := ReadCursor(); c > 0 {
-		return c + 1
-	}
-	return 0
-}
-
-func ReadCursor() int {
-	data, err := os.ReadFile(ConfigFile("cursor"))
-	if err != nil {
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		log.Printf("corrupt cursor file, resetting: %v", err)
-		return 0
-	}
-	return n
-}
-
-func WriteCursor(id int) {
-	Check(os.WriteFile(ConfigFile("cursor"), []byte(strconv.Itoa(id)), 0600))
+func NewJobID() string {
+	return fmt.Sprintf("job-%d", time.Now().UnixNano())
 }
 
 func Check(err error) {

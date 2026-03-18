@@ -16,7 +16,6 @@ import (
 
 	botpkg "github.com/1broseidon/moxie/internal/bot"
 	"github.com/1broseidon/moxie/internal/dispatch"
-	promptpkg "github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/scheduler"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
@@ -100,16 +99,18 @@ func cmdInit() {
 		fatal("chat ID cannot be zero")
 	}
 
-	cfg := store.Config{Token: token, ChatID: chatID}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		fatal("failed to marshal config: %v", err)
+	cfg := store.Config{
+		Channels: map[string]store.ChannelConfig{
+			"telegram": {
+				Provider:  "telegram",
+				Token:     token,
+				ChannelID: strconv.FormatInt(chatID, 10),
+			},
+		},
+		Workspaces: map[string]string{},
 	}
-
+	store.SaveConfig(cfg)
 	path := store.ConfigFile("config.json")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		fatal("failed to write config: %v", err)
-	}
 	fmt.Printf("Config saved to %s\n", path)
 }
 
@@ -119,12 +120,12 @@ func cmdSend() {
 	}
 	msg := strings.Join(os.Args[2:], " ")
 	cfg, bot := mustConfigAndBot()
-	jobID, delivered := botpkg.SendImmediate(bot, cfg.ChatID, msg)
+	jobID, delivered := botpkg.SendImmediate(bot, botpkg.ConfigConversation(cfg), msg)
 	if delivered {
 		fmt.Println("sent")
 		return
 	}
-	fmt.Printf("queued for retry (job %d)\n", jobID)
+	fmt.Printf("queued for retry (job %s)\n", jobID)
 }
 
 func mustConfigAndBot() (store.Config, *tb.Bot) {
@@ -152,7 +153,7 @@ func cmdMessages() {
 func cmdPoll() {
 	format, _ := parseListFlags(2)
 	_, bot := mustConfigAndBot()
-	msgs := extractMessages(getUpdates(bot, store.CursorOffset(), 0))
+	msgs := extractMessages(getUpdates(bot, botpkg.CursorOffset(), 0))
 	if len(msgs) == 0 {
 		return
 	}
@@ -162,7 +163,7 @@ func cmdPoll() {
 			maxID = m.ID
 		}
 	}
-	store.WriteCursor(maxID)
+	botpkg.WriteCursor(maxID)
 	printMessages(msgs, format)
 }
 
@@ -177,16 +178,16 @@ func cmdCursor() {
 			if err != nil {
 				fatal("invalid update_id: %s", os.Args[3])
 			}
-			store.WriteCursor(n)
+			botpkg.WriteCursor(n)
 			fmt.Printf("cursor set to %d\n", n)
 			return
 		case "reset":
-			os.Remove(store.ConfigFile("cursor"))
+			os.Remove(store.ConfigFile("telegram-cursor"))
 			fmt.Println("cursor reset")
 			return
 		}
 	}
-	c := store.ReadCursor()
+	c := botpkg.ReadCursor()
 	if c == 0 {
 		fmt.Println("cursor: not set (will fetch all available)")
 	} else {
@@ -436,8 +437,8 @@ func renderSchedule(sc scheduler.Schedule) string {
 	if !sc.LastRun.IsZero() {
 		fmt.Fprintf(&buf, "Last run: %s\n", formatScheduleTime(sc.LastRun))
 	}
-	if sc.RunningJobID != 0 {
-		fmt.Fprintf(&buf, "Running job: %d\n", sc.RunningJobID)
+	if sc.RunningJobID != "" {
+		fmt.Fprintf(&buf, "Running job: %s\n", sc.RunningJobID)
 	}
 	if sc.Action == scheduler.ActionDispatch {
 		fmt.Fprintf(&buf, "Backend: %s\n", sc.Backend)
@@ -514,12 +515,12 @@ func scheduleState(sc scheduler.Schedule) store.State {
 		st.Backend = "claude"
 	}
 	if st.ThreadID == "" {
-		st.ThreadID = "telegram"
+		st.ThreadID = "chat"
 	}
 	return st
 }
 
-func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, chatID int64) {
+func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
 	due, err := schedules.Due(time.Now())
 	if err != nil {
 		log.Printf("schedule due check failed: %v", err)
@@ -527,11 +528,12 @@ func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.
 	}
 	for _, sc := range due {
 		job := botpkg.PendingJob{
-			UpdateID:   dispatch.NewSyntheticJobID(),
-			ScheduleID: sc.ID,
-			ChatID:     chatID,
-			CWD:        sc.CWD,
-			State:      scheduleState(sc),
+			ID:             store.NewJobID(),
+			ScheduleID:     sc.ID,
+			ConversationID: conversationID,
+			Source:         "schedule",
+			CWD:            sc.CWD,
+			State:          scheduleState(sc),
 		}
 		switch sc.Action {
 		case scheduler.ActionSend:
@@ -545,13 +547,13 @@ func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.
 		}
 
 		store.WriteJob(job)
-		if _, err := schedules.AttachJob(sc.ID, job.UpdateID); err != nil {
+		if _, err := schedules.AttachJob(sc.ID, job.ID); err != nil {
 			log.Printf("schedule attach failed for %s: %v", sc.ID, err)
-			store.RemoveJob(job.UpdateID)
+			store.RemoveJob(job.ID)
 			continue
 		}
 
-		log.Printf("running schedule %s via job %d", sc.ID, job.UpdateID)
+		log.Printf("running schedule %s via job %s", sc.ID, job.ID)
 		botpkg.ProcessJob(job, bot, client, schedules)
 		if dispatch.IsShuttingDown() {
 			return
@@ -559,18 +561,18 @@ func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.
 	}
 }
 
-func startScheduleLoop(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, chatID int64) {
+func startScheduleLoop(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
 	ticker := time.NewTicker(30 * time.Second)
 	go func() {
 		defer ticker.Stop()
-		runDueSchedules(bot, client, schedules, chatID)
+		runDueSchedules(bot, client, schedules, conversationID)
 		for {
 			select {
 			case <-ticker.C:
 				if dispatch.IsShuttingDown() {
 					return
 				}
-				runDueSchedules(bot, client, schedules, chatID)
+				runDueSchedules(bot, client, schedules, conversationID)
 			}
 		}
 	}()
@@ -612,7 +614,7 @@ func cmdServe() {
 	}
 
 	client := &oneagent.Client{Backends: backends}
-	promptpkg.ApplySystemPrompt(client.Backends)
+	botpkg.ApplySystemPrompt(client.Backends)
 
 	bot, err := botpkg.NewBot(cfg)
 	if err != nil {
@@ -624,14 +626,14 @@ func cmdServe() {
 		log.Printf("schedule repair failed: %v", err)
 	}
 	botpkg.RecoverPendingJobs(bot, client, schedules)
-	if store.ReadCursor() == 0 {
+	if botpkg.ReadCursor() == 0 {
 		botpkg.SeedCursor(bot, getUpdates)
 	}
 	botpkg.RegisterCommands(bot)
-	startScheduleLoop(bot, client, schedules, cfg.ChatID)
+	startScheduleLoop(bot, client, schedules, botpkg.ConfigConversation(cfg).ID())
 	startDeliveryRetryLoop(bot, client, schedules)
 
-	cursor := store.ReadCursor()
+	cursor := botpkg.ReadCursor()
 	st := store.ReadState()
 	log.Printf("serving — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
 
@@ -659,7 +661,7 @@ func cmdServe() {
 			st = store.ReadState()
 			botpkg.HandleUpdate(u, bot, &cfg, defaultCWD, st, client)
 			cursor = u.ID
-			store.WriteCursor(cursor)
+			botpkg.WriteCursor(cursor)
 			if dispatch.IsShuttingDown() {
 				log.Println("shutting down")
 				return

@@ -53,7 +53,7 @@ func RunModel(job *store.PendingJob, client *oneagent.Client, onActivity func(ac
 		Model:    job.State.Model,
 		CWD:      job.CWD,
 		ThreadID: job.State.ThreadID,
-		Source:   "telegram",
+		Source:   job.Source,
 	}
 
 	emit := func(ev oneagent.StreamEvent) {
@@ -104,7 +104,7 @@ func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	if job.Status != "delivered" {
 		if callbacks.OnResult != nil {
 			if err := callbacks.OnResult(job.Result); err != nil {
-				log.Printf("delivery error for %d: %v", job.UpdateID, err)
+				log.Printf("delivery error for %s: %v", job.ID, err)
 				store.WriteJob(*job)
 				return
 			}
@@ -113,13 +113,13 @@ func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 		store.WriteJob(*job)
 	}
 	if job.ScheduleID != "" && schedules != nil {
-		if _, err := schedules.MarkDone(job.ScheduleID, job.UpdateID, time.Now()); err != nil {
+		if _, err := schedules.MarkDone(job.ScheduleID, job.ID, time.Now()); err != nil {
 			log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
 			return
 		}
 	}
 	store.CleanupJobTemp(*job)
-	store.RemoveJob(job.UpdateID)
+	store.RemoveJob(job.ID)
 }
 
 func CanRetryJob(job store.PendingJob) bool {
@@ -129,9 +129,9 @@ func CanRetryJob(job store.PendingJob) bool {
 	if _, err := os.Stat(job.TempPath); err == nil {
 		return true
 	} else if os.IsNotExist(err) {
-		log.Printf("cannot retry job %d: missing temp file %s", job.UpdateID, job.TempPath)
+		log.Printf("cannot retry job %s: missing temp file %s", job.ID, job.TempPath)
 	} else {
-		log.Printf("cannot retry job %d: temp file check failed for %s: %v", job.UpdateID, job.TempPath, err)
+		log.Printf("cannot retry job %s: temp file check failed for %s: %v", job.ID, job.TempPath, err)
 	}
 	return false
 }
@@ -142,7 +142,6 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 		return false
 	}
 	log.Printf("recovering %d pending job(s)", len(storedJobs))
-	maxRecovered := 0
 	for _, storedJob := range storedJobs {
 		job := storedJob
 		callbacks := Callbacks{}
@@ -151,37 +150,25 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 		}
 		switch job.Status {
 		case "ready":
-			log.Printf("replaying ready job %d", job.UpdateID)
+			log.Printf("replaying ready job %s", job.ID)
 			ProcessJob(&job, client, schedules, callbacks)
-			if job.UpdateID > maxRecovered {
-				maxRecovered = job.UpdateID
-			}
 		case "delivered":
-			log.Printf("finalizing delivered job %d", job.UpdateID)
+			log.Printf("finalizing delivered job %s", job.ID)
 			ProcessJob(&job, client, schedules, callbacks)
-			if job.UpdateID > maxRecovered {
-				maxRecovered = job.UpdateID
-			}
 		case "running":
 			if !CanRetryJob(job) {
-				log.Printf("discarding interrupted job %d; update will be retried", job.UpdateID)
+				log.Printf("discarding interrupted job %s; source event may be retried", job.ID)
 				store.CleanupJobTemp(job)
-				store.RemoveJob(job.UpdateID)
+				store.RemoveJob(job.ID)
 				continue
 			}
-			log.Printf("retrying interrupted job %d", job.UpdateID)
+			log.Printf("retrying interrupted job %s", job.ID)
 			ProcessJob(&job, client, schedules, callbacks)
-			if job.UpdateID > maxRecovered {
-				maxRecovered = job.UpdateID
-			}
 		default:
-			log.Printf("discarding unknown job state %q for %d", job.Status, job.UpdateID)
+			log.Printf("discarding unknown job state %q for %s", job.Status, job.ID)
 			store.CleanupJobTemp(job)
-			store.RemoveJob(job.UpdateID)
+			store.RemoveJob(job.ID)
 		}
-	}
-	if maxRecovered > store.ReadCursor() {
-		store.WriteCursor(maxRecovered)
 	}
 	return true
 }
@@ -203,26 +190,11 @@ func RetryDeliverableJobs(client *oneagent.Client, schedules *scheduler.Store, c
 		if callbackFactory != nil {
 			callbacks = callbackFactory(&job)
 		}
-		log.Printf("retrying deliverable job %d (%s)", job.UpdateID, job.Status)
+		log.Printf("retrying deliverable job %s (%s)", job.ID, job.Status)
 		ProcessJob(&job, client, schedules, callbacks)
 		retried = true
 	}
 	return retried
-}
-
-func NewSyntheticJobID() int {
-	n := time.Now().UnixNano()
-	if n < 0 {
-		n = -n
-	}
-	maxInt := int64(^uint(0) >> 1)
-	if n > maxInt {
-		n %= maxInt
-	}
-	if n == 0 {
-		n = 1
-	}
-	return -int(n)
 }
 
 func IsShutdownError(errText string) bool {

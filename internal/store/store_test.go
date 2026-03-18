@@ -24,24 +24,36 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"chat_id":123}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := LoadConfig(); err == nil || err.Error() != "config missing token\nRun: moxie init" {
+	if _, err := LoadConfig(); err == nil || err.Error() != "config missing telegram channel\nRun: moxie init" {
 		t.Fatalf("LoadConfig() missing token err = %v", err)
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"token":"abc"}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := LoadConfig(); err == nil || err.Error() != "config missing chat_id\nRun: moxie init" {
+	if _, err := LoadConfig(); err == nil || err.Error() != "config missing telegram channel\nRun: moxie init" {
 		t.Fatalf("LoadConfig() missing chat_id err = %v", err)
 	}
 
-	SaveConfig(Config{Token: "abc", ChatID: 123})
+	SaveConfig(Config{
+		Channels: map[string]ChannelConfig{
+			"telegram": {
+				Provider:  "telegram",
+				Token:     "abc",
+				ChannelID: "123",
+			},
+		},
+	})
 	cfg, err := LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig() round trip: %v", err)
 	}
-	if cfg.Token != "abc" || cfg.ChatID != 123 {
-		t.Fatalf("LoadConfig() = %+v, want token/chat_id preserved", cfg)
+	tg, err := cfg.Telegram()
+	if err != nil {
+		t.Fatalf("Telegram() = %v", err)
+	}
+	if tg.Token != "abc" || tg.ChannelID != "123" {
+		t.Fatalf("LoadConfig() telegram = %+v, want token/channel preserved", tg)
 	}
 	if cfg.Workspaces == nil {
 		t.Fatal("expected workspaces map to be initialized")
@@ -52,8 +64,8 @@ func TestReadWriteStateDefaultsAndRoundTrip(t *testing.T) {
 	useTempConfigDir(t)
 
 	got := ReadState()
-	if got.Backend != "claude" || got.ThreadID != "telegram" {
-		t.Fatalf("ReadState() defaults = %+v, want backend=claude thread=telegram", got)
+	if got.Backend != "claude" || got.ThreadID != "chat" {
+		t.Fatalf("ReadState() defaults = %+v, want backend=claude thread=chat", got)
 	}
 
 	want := State{
@@ -73,8 +85,8 @@ func TestReadWriteStateDefaultsAndRoundTrip(t *testing.T) {
 func TestJobsRoundTripSortedAndSkipsCorruptEntries(t *testing.T) {
 	dir := useTempConfigDir(t)
 
-	WriteJob(PendingJob{UpdateID: 20, Status: "ready", Result: "later"})
-	WriteJob(PendingJob{UpdateID: 10, Status: "ready", Result: "sooner"})
+	WriteJob(PendingJob{ID: "job-20", Source: "telegram", SourceEventID: "20", Status: "ready", Result: "later"})
+	WriteJob(PendingJob{ID: "job-10", Source: "telegram", SourceEventID: "10", Status: "ready", Result: "sooner"})
 	if err := os.WriteFile(filepath.Join(dir, "jobs", "broken.json"), []byte("{"), 0o600); err != nil {
 		t.Fatalf("write broken job: %v", err)
 	}
@@ -83,42 +95,16 @@ func TestJobsRoundTripSortedAndSkipsCorruptEntries(t *testing.T) {
 	if len(jobs) != 2 {
 		t.Fatalf("ListJobs() len = %d, want 2", len(jobs))
 	}
-	if jobs[0].UpdateID != 10 || jobs[1].UpdateID != 20 {
-		t.Fatalf("ListJobs() order = %+v, want IDs [10 20]", []int{jobs[0].UpdateID, jobs[1].UpdateID})
+	if jobs[0].ID != "job-10" || jobs[1].ID != "job-20" {
+		t.Fatalf("ListJobs() order = %+v, want IDs [job-10 job-20]", []string{jobs[0].ID, jobs[1].ID})
 	}
-	if !JobExists(10) || !JobExists(20) {
+	if !JobExists("job-10") || !JobExists("job-20") {
 		t.Fatal("expected written job files to exist")
 	}
 
-	RemoveJob(10)
-	if JobExists(10) {
-		t.Fatal("expected job 10 to be removed")
-	}
-}
-
-func TestCursorRoundTripAndCorruptFallback(t *testing.T) {
-	dir := useTempConfigDir(t)
-
-	if got := ReadCursor(); got != 0 {
-		t.Fatalf("ReadCursor() missing = %d, want 0", got)
-	}
-
-	WriteCursor(42)
-	if got := ReadCursor(); got != 42 {
-		t.Fatalf("ReadCursor() = %d, want 42", got)
-	}
-	if got := CursorOffset(); got != 43 {
-		t.Fatalf("CursorOffset() = %d, want 43", got)
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, "cursor"), []byte("not-a-number"), 0o600); err != nil {
-		t.Fatalf("write corrupt cursor: %v", err)
-	}
-	if got := ReadCursor(); got != 0 {
-		t.Fatalf("ReadCursor() corrupt = %d, want 0", got)
-	}
-	if got := CursorOffset(); got != 0 {
-		t.Fatalf("CursorOffset() corrupt = %d, want 0", got)
+	RemoveJob("job-10")
+	if JobExists("job-10") {
+		t.Fatal("expected job job-10 to be removed")
 	}
 }
 

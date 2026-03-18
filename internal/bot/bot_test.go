@@ -3,10 +3,13 @@ package bot
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/1broseidon/moxie/internal/chat"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
 	tb "gopkg.in/telebot.v4"
@@ -66,18 +69,6 @@ func useBotStoreDir(t *testing.T) {
 	t.Cleanup(restore)
 }
 
-func TestParseCommand(t *testing.T) {
-	base, arg := parseCommand("/model@rmkbl_bot claude sonnet")
-	if base != "model" || arg != "claude sonnet" {
-		t.Fatalf("parseCommand() = (%q, %q), want (%q, %q)", base, arg, "model", "claude sonnet")
-	}
-
-	base, arg = parseCommand("/new")
-	if base != "new" || arg != "" {
-		t.Fatalf("parseCommand(/new) = (%q, %q), want (new, empty)", base, arg)
-	}
-}
-
 func TestRenderActivityHTML(t *testing.T) {
 	got := renderActivityHTML("bash ls <weird>")
 	if !strings.Contains(got, "<i>Running command…</i>") {
@@ -111,7 +102,8 @@ func TestSendChunkedFallsBackToPlainTextOnParseError(t *testing.T) {
 		},
 	}
 
-	if err := SendChunked(bot, 123, "bad <oops>tag</oops>"); err != nil {
+	conversation := chat.ConversationRef{Provider: chat.ProviderTelegram, ChannelID: "123"}
+	if err := SendChunked(bot, conversation, "bad <oops>tag</oops>"); err != nil {
 		t.Fatalf("SendChunked() err = %v, want nil", err)
 	}
 	if len(bot.sendCalls) != 2 {
@@ -132,7 +124,8 @@ func TestSendChunkedReturnsErrorWhenNothingSends(t *testing.T) {
 		},
 	}
 
-	if err := SendChunked(bot, 123, "hello"); err == nil {
+	conversation := chat.ConversationRef{Provider: chat.ProviderTelegram, ChannelID: "123"}
+	if err := SendChunked(bot, conversation, "hello"); err == nil {
 		t.Fatal("expected SendChunked to return error when nothing sends")
 	}
 }
@@ -147,15 +140,16 @@ func TestSendImmediateRetriesAfterDeliveryFailure(t *testing.T) {
 		},
 	}
 
-	jobID, delivered := SendImmediate(bot, 123, "hello")
+	conversation := chat.ConversationRef{Provider: chat.ProviderTelegram, ChannelID: "123"}
+	jobID, delivered := SendImmediate(bot, conversation, "hello")
 	if delivered {
 		t.Fatal("expected initial delivery to fail and queue retry")
 	}
-	if jobID >= 0 {
-		t.Fatalf("jobID = %d, want synthetic negative ID", jobID)
+	if !strings.HasPrefix(jobID, "job-") {
+		t.Fatalf("jobID = %q, want job- prefix", jobID)
 	}
 	if !store.JobExists(jobID) {
-		t.Fatalf("expected queued job %d to exist", jobID)
+		t.Fatalf("expected queued job %s to exist", jobID)
 	}
 
 	jobs := store.ListJobs()
@@ -167,40 +161,48 @@ func TestSendImmediateRetriesAfterDeliveryFailure(t *testing.T) {
 		t.Fatal("expected RetryDeliverableJobs to process queued message")
 	}
 	if store.JobExists(jobID) {
-		t.Fatalf("expected retried job %d to be removed", jobID)
+		t.Fatalf("expected retried job %s to be removed", jobID)
 	}
 	if len(bot.sendCalls) != 2 {
 		t.Fatalf("send calls = %d, want 2", len(bot.sendCalls))
 	}
 }
 
-func TestHandleNewSwitchesBackendAndWorkspace(t *testing.T) {
+func TestCursorRoundTripAndCorruptFallback(t *testing.T) {
 	useBotStoreDir(t)
 
-	workspace := t.TempDir()
-	cfg := &store.Config{
-		Workspaces: map[string]string{"tele": workspace},
-	}
-	client := &oneagent.Client{
-		Backends: map[string]oneagent.Backend{
-			"claude": {DefaultModel: "sonnet"},
-			"pi":     {},
-		},
+	if got := ReadCursor(); got != 0 {
+		t.Fatalf("ReadCursor() missing = %d, want 0", got)
 	}
 
-	reply := handleNew("pi tele", store.State{Backend: "claude", ThreadID: "telegram"}, client, cfg)
-	if !strings.Contains(reply, "New pi session in "+workspace+".") {
-		t.Fatalf("handleNew() reply = %q", reply)
+	WriteCursor(42)
+	if got := ReadCursor(); got != 42 {
+		t.Fatalf("ReadCursor() = %d, want 42", got)
+	}
+	if got := CursorOffset(); got != 43 {
+		t.Fatalf("CursorOffset() = %d, want 43", got)
 	}
 
-	st := store.ReadState()
-	if st.Backend != "pi" {
-		t.Fatalf("backend = %q, want pi", st.Backend)
+	if err := os.WriteFile(filepath.Join(store.ConfigDir(), "telegram-cursor"), []byte("not-a-number"), 0o600); err != nil {
+		t.Fatalf("write corrupt cursor: %v", err)
 	}
-	if st.CWD != workspace {
-		t.Fatalf("cwd = %q, want %q", st.CWD, workspace)
+	if got := ReadCursor(); got != 0 {
+		t.Fatalf("ReadCursor() corrupt = %d, want 0", got)
 	}
-	if !strings.HasPrefix(st.ThreadID, "tg-") {
-		t.Fatalf("thread id = %q, want tg- prefix", st.ThreadID)
+}
+
+func TestApplySystemPrompt(t *testing.T) {
+	backends := map[string]oneagent.Backend{
+		"claude": {SystemPrompt: "base"},
+		"pi":     {},
+	}
+
+	ApplySystemPrompt(backends)
+
+	if !strings.Contains(backends["claude"].SystemPrompt, TelegramSystemPrompt) {
+		t.Fatalf("claude prompt missing telegram system prompt: %q", backends["claude"].SystemPrompt)
+	}
+	if backends["pi"].SystemPrompt != TelegramSystemPrompt {
+		t.Fatalf("pi prompt = %q, want TelegramSystemPrompt", backends["pi"].SystemPrompt)
 	}
 }

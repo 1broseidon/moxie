@@ -41,7 +41,7 @@ type Schedule struct {
 	CreatedAt    time.Time `json:"created_at"`
 	NextRun      time.Time `json:"next_run"`
 	LastRun      time.Time `json:"last_run,omitempty"`
-	RunningJobID int       `json:"running_job_id,omitempty"`
+	RunningJobID string    `json:"running_job_id,omitempty"`
 }
 
 type AddInput struct {
@@ -129,8 +129,8 @@ func (s *Store) Delete(id string) error {
 	found := false
 	for _, sc := range schedules {
 		if sc.ID == id {
-			if sc.RunningJobID != 0 {
-				return fmt.Errorf("schedule %s is running via job %d", id, sc.RunningJobID)
+			if sc.RunningJobID != "" {
+				return fmt.Errorf("schedule %s is running via job %s", id, sc.RunningJobID)
 			}
 			found = true
 			continue
@@ -153,7 +153,7 @@ func (s *Store) Due(now time.Time) ([]Schedule, error) {
 	}
 	due := make([]Schedule, 0)
 	for _, sc := range schedules {
-		if sc.RunningJobID != 0 {
+		if sc.RunningJobID != "" {
 			continue
 		}
 		if sc.NextRun.IsZero() || sc.NextRun.After(now) {
@@ -165,9 +165,9 @@ func (s *Store) Due(now time.Time) ([]Schedule, error) {
 	return due, nil
 }
 
-func (s *Store) AttachJob(id string, jobID int) (Schedule, error) {
-	if jobID == 0 {
-		return Schedule{}, fmt.Errorf("job id cannot be zero")
+func (s *Store) AttachJob(id, jobID string) (Schedule, error) {
+	if strings.TrimSpace(jobID) == "" {
+		return Schedule{}, fmt.Errorf("job id cannot be empty")
 	}
 	schedules, err := s.load()
 	if err != nil {
@@ -177,8 +177,8 @@ func (s *Store) AttachJob(id string, jobID int) (Schedule, error) {
 		if sc.ID != id {
 			continue
 		}
-		if sc.RunningJobID != 0 && sc.RunningJobID != jobID {
-			return Schedule{}, fmt.Errorf("schedule %s already attached to job %d", id, sc.RunningJobID)
+		if sc.RunningJobID != "" && sc.RunningJobID != jobID {
+			return Schedule{}, fmt.Errorf("schedule %s already attached to job %s", id, sc.RunningJobID)
 		}
 		sc.RunningJobID = jobID
 		schedules[i] = sc
@@ -191,7 +191,7 @@ func (s *Store) AttachJob(id string, jobID int) (Schedule, error) {
 	return Schedule{}, os.ErrNotExist
 }
 
-func (s *Store) MarkDone(id string, jobID int, finishedAt time.Time) (Schedule, error) {
+func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, error) {
 	schedules, err := s.load()
 	if err != nil {
 		return Schedule{}, err
@@ -203,10 +203,10 @@ func (s *Store) MarkDone(id string, jobID int, finishedAt time.Time) (Schedule, 
 		if sc.ID != id {
 			continue
 		}
-		if sc.RunningJobID != 0 && sc.RunningJobID != jobID {
-			return Schedule{}, fmt.Errorf("schedule %s attached to different job %d", id, sc.RunningJobID)
+		if sc.RunningJobID != "" && sc.RunningJobID != jobID {
+			return Schedule{}, fmt.Errorf("schedule %s attached to different job %s", id, sc.RunningJobID)
 		}
-		sc.RunningJobID = 0
+		sc.RunningJobID = ""
 		sc.LastRun = finishedAt
 		if sc.Trigger == TriggerAt {
 			next := append(schedules[:i:i], schedules[i+1:]...)
@@ -230,20 +230,20 @@ func (s *Store) MarkDone(id string, jobID int, finishedAt time.Time) (Schedule, 
 	return Schedule{}, os.ErrNotExist
 }
 
-func (s *Store) Repair(jobExists func(int) bool) error {
+func (s *Store) Repair(jobExists func(string) bool) error {
 	schedules, err := s.load()
 	if err != nil {
 		return err
 	}
 	changed := false
 	for i, sc := range schedules {
-		if sc.RunningJobID == 0 {
+		if sc.RunningJobID == "" {
 			continue
 		}
 		if jobExists(sc.RunningJobID) {
 			continue
 		}
-		sc.RunningJobID = 0
+		sc.RunningJobID = ""
 		schedules[i] = sc
 		changed = true
 	}

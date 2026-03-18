@@ -14,8 +14,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1broseidon/moxie/internal/chat"
 	"github.com/1broseidon/moxie/internal/dispatch"
-	promptpkg "github.com/1broseidon/moxie/internal/prompt"
+	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/scheduler"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
@@ -58,7 +59,11 @@ func senderName(u *tb.User) string {
 }
 
 func NewBot(cfg store.Config) (*tb.Bot, error) {
-	return tb.NewBot(tb.Settings{Token: cfg.Token})
+	tg, err := cfg.Telegram()
+	if err != nil {
+		return nil, err
+	}
+	return tb.NewBot(tb.Settings{Token: tg.Token})
 }
 
 func compactText(text string) string {
@@ -117,48 +122,111 @@ func renderActivityHTML(activity string) string {
 type runningStatus struct {
 	bot sender
 	job *PendingJob
+	st  telegramStatusState
+}
+
+func newRunningStatus(bot sender, job *PendingJob) runningStatus {
+	return runningStatus{
+		bot: bot,
+		job: job,
+		st:  readStatus(job.ID),
+	}
+}
+
+func ConfigConversation(cfg store.Config) chat.ConversationRef {
+	tg, err := cfg.Telegram()
+	if err != nil {
+		return chat.ConversationRef{Provider: chat.ProviderTelegram}
+	}
+	return chat.ConversationRef{
+		Provider:  chat.ProviderTelegram,
+		ChannelID: tg.ChannelID,
+	}
+}
+
+func chatSettings(cfg *store.Config) chat.Settings {
+	workspaces := cfg.Workspaces
+	if workspaces == nil {
+		workspaces = map[string]string{}
+	}
+	return chat.Settings{
+		Workspaces: workspaces,
+		SaveWorkspaces: func(updated map[string]string) {
+			cfg.Workspaces = updated
+			store.SaveConfig(*cfg)
+		},
+	}
+}
+
+func conversationFromID(id string) chat.ConversationRef {
+	return chat.ParseConversationID(id)
+}
+
+func telegramChatID(ref chat.ConversationRef) (int64, error) {
+	if ref.Provider != chat.ProviderTelegram {
+		return 0, fmt.Errorf("unsupported provider for telegram adapter: %s", ref.Provider)
+	}
+	chatID, err := strconv.ParseInt(ref.ChannelID, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid telegram chat id %q: %w", ref.ChannelID, err)
+	}
+	return chatID, nil
 }
 
 func (s runningStatus) show(activity string) {
 	text := renderActivityHTML(activity)
-	if text == s.job.StatusMessageHTML {
+	if text == s.st.HTML {
 		return
 	}
 
-	if s.job.StatusMessageID == 0 {
-		msg, err := s.bot.Send(tb.ChatID(s.job.ChatID), text, tb.ModeHTML)
+	conversation := conversationFromID(s.job.ConversationID)
+	chatID, err := telegramChatID(conversation)
+	if err != nil {
+		log.Printf("status send error: %v", err)
+		return
+	}
+
+	if s.st.Message.MessageID == "" {
+		msg, err := s.bot.Send(tb.ChatID(chatID), text, tb.ModeHTML)
 		if err != nil {
 			log.Printf("status send error: %v", err)
 			return
 		}
-		s.job.StatusMessageID = msg.ID
-		s.job.StatusMessageHTML = text
-		store.WriteJob(*s.job)
+		s.st.Message = chat.MessageRef{
+			Conversation: conversation,
+			MessageID:    strconv.Itoa(msg.ID),
+		}
+		s.st.HTML = text
+		writeStatus(s.job.ID, s.st)
 		return
 	}
 
-	stored := tb.StoredMessage{MessageID: strconv.Itoa(s.job.StatusMessageID), ChatID: s.job.ChatID}
+	stored := tb.StoredMessage{MessageID: s.st.Message.MessageID, ChatID: chatID}
 	if _, err := s.bot.Edit(stored, text, tb.ModeHTML); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
 			return
 		}
-		log.Printf("status edit error for %d: %v", s.job.StatusMessageID, err)
+		log.Printf("status edit error for %s: %v", s.st.Message.MessageID, err)
 		return
 	}
-	s.job.StatusMessageHTML = text
-	store.WriteJob(*s.job)
+	s.st.HTML = text
+	writeStatus(s.job.ID, s.st)
 }
 
 func (s runningStatus) clear() {
-	if s.job.StatusMessageID != 0 {
-		stored := tb.StoredMessage{MessageID: strconv.Itoa(s.job.StatusMessageID), ChatID: s.job.ChatID}
+	if s.st.Message.MessageID != "" {
+		chatID, err := telegramChatID(s.st.Message.Conversation)
+		if err != nil {
+			log.Printf("status delete error for %s: %v", s.st.Message.MessageID, err)
+			removeStatus(s.job.ID)
+			return
+		}
+		stored := tb.StoredMessage{MessageID: s.st.Message.MessageID, ChatID: chatID}
 		if err := s.bot.Delete(stored); err != nil && !strings.Contains(strings.ToLower(err.Error()), "message to delete not found") {
-			log.Printf("status delete error for %d: %v", s.job.StatusMessageID, err)
+			log.Printf("status delete error for %s: %v", s.st.Message.MessageID, err)
 		}
 	}
-	s.job.StatusMessageID = 0
-	s.job.StatusMessageHTML = ""
-	store.WriteJob(*s.job)
+	removeStatus(s.job.ID)
 }
 
 func RegisterCommands(bot sender) {
@@ -177,222 +245,25 @@ func RegisterCommands(bot sender) {
 	bot.Raw("setMyCommands", json.RawMessage(data))
 }
 
-func HandleCommand(text string, client *oneagent.Client, cfg *store.Config) string {
-	base, arg := parseCommand(text)
-	st := store.ReadState()
-
-	switch base {
-	case "new":
-		return handleNew(arg, st, client, cfg)
-	case "model":
-		if arg == "" {
-			b := client.Backends[st.Backend]
-			model := st.Model
-			if model == "" {
-				model = b.DefaultModel
-			}
-			return fmt.Sprintf("Backend: %s\nModel: %s", st.Backend, model)
-		}
-		return switchModel(arg, st, client)
-	case "cwd":
-		return handleCWD(arg, st, cfg)
-	case "threads":
-		return handleThreads(arg, st, client)
-	case "compact":
-		if err := client.CompactThread(st.ThreadID, st.Backend); err != nil {
-			return "Compact failed: " + err.Error()
-		}
-		return "Thread compacted."
-	}
-	return ""
-}
-
-func parseCommand(text string) (base, arg string) {
-	cmd := strings.TrimPrefix(text, "/")
-	parts := strings.SplitN(cmd, " ", 2)
-	base = parts[0]
-	if idx := strings.Index(base, "@"); idx >= 0 {
-		base = base[:idx]
-	}
-	if len(parts) > 1 {
-		arg = strings.TrimSpace(parts[1])
-	}
-	return
-}
-
-func isSupportedCommand(name string) bool {
-	switch name {
-	case "new", "model", "cwd", "threads", "compact":
-		return true
-	default:
-		return false
-	}
-}
-
-func handleNew(arg string, st store.State, client *oneagent.Client, cfg *store.Config) string {
-	for _, word := range strings.Fields(arg) {
-		if _, ok := client.Backends[word]; ok {
-			st.Backend = word
-			st.Model = ""
-		} else if path, ok := cfg.Workspaces[word]; ok {
-			resolved, err := resolveDir(path)
-			if err != nil {
-				return fmt.Sprintf("Workspace %s is invalid: %v", word, err)
-			}
-			if path != resolved {
-				cfg.Workspaces[word] = resolved
-				store.SaveConfig(*cfg)
-			}
-			st.CWD = resolved
-		} else {
-			return fmt.Sprintf("Unknown backend or workspace: %s", word)
-		}
-	}
-	st.ThreadID = fmt.Sprintf("tg-%d", time.Now().Unix())
-	store.WriteState(st)
-	cwd := st.CWD
-	if cwd == "" {
-		cwd = "(default)"
-	}
-	return fmt.Sprintf("New %s session in %s.", st.Backend, cwd)
-}
-
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			log.Printf("error: cannot expand ~: %v", err)
-			return path
-		}
-		return filepath.Join(home, path[2:])
-	}
-	return path
-}
-
-func resolveDir(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return "", fmt.Errorf("path cannot be empty")
-	}
-	resolved := expandHome(path)
-	abs, err := filepath.Abs(resolved)
-	if err != nil {
-		return "", fmt.Errorf("resolve path: %w", err)
-	}
-	info, err := os.Stat(abs)
-	if err != nil {
-		return "", fmt.Errorf("access path: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("not a directory: %s", abs)
-	}
-	return abs, nil
-}
-
-func handleCWD(arg string, st store.State, cfg *store.Config) string {
-	if arg == "" {
-		cwd := st.CWD
-		if cwd == "" {
-			cwd = "(default from --cwd flag)"
-		}
-		var buf strings.Builder
-		fmt.Fprintf(&buf, "CWD: %s\n\nWorkspaces:\n", cwd)
-		for name, path := range cfg.Workspaces {
-			fmt.Fprintf(&buf, "  %s → %s\n", name, path)
-		}
-		if len(cfg.Workspaces) == 0 {
-			buf.WriteString("  (none)\n")
-		}
-		buf.WriteString("\n/cwd <name> to switch\n/cwd <name> <path> to save")
-		return buf.String()
-	}
-	parts := strings.SplitN(arg, " ", 2)
-	if len(parts) == 2 {
-		name := strings.TrimSpace(parts[0])
-		if name == "" {
-			return "Workspace name cannot be empty."
-		}
-		resolved, err := resolveDir(parts[1])
-		if err != nil {
-			return "Invalid workspace path: " + err.Error()
-		}
-		cfg.Workspaces[name] = resolved
-		store.SaveConfig(*cfg)
-		return fmt.Sprintf("Workspace %s → %s", name, resolved)
-	}
-	name := strings.TrimSpace(parts[0])
-	if path, ok := cfg.Workspaces[name]; ok {
-		resolved, err := resolveDir(path)
-		if err != nil {
-			return fmt.Sprintf("Workspace %s is invalid: %v", name, err)
-		}
-		if path != resolved {
-			cfg.Workspaces[name] = resolved
-			store.SaveConfig(*cfg)
-		}
-		st.CWD = resolved
-		store.WriteState(st)
-		return fmt.Sprintf("CWD: %s (%s)", name, st.CWD)
-	}
-	return "Unknown workspace: " + name + "\n/cwd <name> <path> to create"
-}
-
-func switchModel(arg string, st store.State, client *oneagent.Client) string {
-	parts := strings.SplitN(arg, " ", 2)
-	if _, ok := client.Backends[parts[0]]; ok {
-		st.Backend = parts[0]
-		st.Model = ""
-		if len(parts) > 1 {
-			st.Model = parts[1]
-		}
-		store.WriteState(st)
-		if st.Model != "" {
-			return fmt.Sprintf("Switched to %s (%s)", st.Backend, st.Model)
-		}
-		return "Switched to " + st.Backend
-	}
-	st.Model = arg
-	store.WriteState(st)
-	return "Model set to " + arg
-}
-
-func handleThreads(arg string, st store.State, client *oneagent.Client) string {
-	if arg != "" {
-		st.ThreadID = arg
-		store.WriteState(st)
-		return "Switched to thread " + arg
-	}
-	ids, err := client.ListThreads()
-	if err != nil || len(ids) == 0 {
-		return "No saved threads."
-	}
-	var buf strings.Builder
-	for _, id := range ids {
-		marker := "  "
-		if id == st.ThreadID {
-			marker = "> "
-		}
-		fmt.Fprintf(&buf, "%s%s\n", marker, id)
-	}
-	buf.WriteString("\n/threads <name> to switch")
-	return buf.String()
-}
-
 func SeedCursor(bot *tb.Bot, fetchUpdates func(*tb.Bot, int, int) []tb.Update) {
-	if store.ReadCursor() != 0 {
+	if ReadCursor() != 0 {
 		return
 	}
 	updates := fetchUpdates(bot, -1, 0)
 	if len(updates) > 0 {
 		last := updates[len(updates)-1]
-		store.WriteCursor(last.ID)
+		WriteCursor(last.ID)
 		log.Printf("cursor seeded to %d (skipping old messages)", last.ID)
 	}
 }
 
-func SendChunked(bot sender, chatID int64, text string) error {
+func SendChunked(bot sender, conversation chat.ConversationRef, text string) error {
 	sentAny := false
 	var firstErr error
+	chatID, err := telegramChatID(conversation)
+	if err != nil {
+		return err
+	}
 
 	for len(text) > 0 {
 		chunk := text
@@ -442,7 +313,11 @@ func SendChunked(bot sender, chatID int64, text string) error {
 	return nil
 }
 
-func StartTyping(bot sender, chatID int64) func() {
+func StartTyping(bot sender, conversation chat.ConversationRef) func() {
+	chatID, err := telegramChatID(conversation)
+	if err != nil {
+		return func() {}
+	}
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -493,7 +368,7 @@ func BuildInboundPrompt(bot fileSender, m *tb.Message) (string, string, error) {
 		kind = "a file (" + origName + ")"
 		fallback = "User sent file: " + origName
 	}
-	return promptpkg.FormatMediaPrompt(kind, path, m.Caption, fallback), path, nil
+	return prompt.FormatMediaPrompt(kind, path, m.Caption, fallback), path, nil
 }
 
 func SaveTelegramFile(bot fileSender, file *tb.File, originalName, fallbackBase, defaultExt string) (string, error) {
@@ -565,10 +440,10 @@ func SplitResponseFiles(text string) ([]string, string) {
 	return paths, cleaned
 }
 
-func SendTaggedFiles(bot sender, chatID int64, paths []string) []string {
+func SendTaggedFiles(bot sender, conversation chat.ConversationRef, paths []string) []string {
 	failures := make([]string, 0)
 	for _, path := range paths {
-		if err := SendTaggedFile(bot, chatID, path); err != nil {
+		if err := SendTaggedFile(bot, conversation, path); err != nil {
 			log.Printf("send file error for %s: %v", path, err)
 			failures = append(failures, "Failed to send file: "+filepath.Base(path))
 		}
@@ -576,17 +451,21 @@ func SendTaggedFiles(bot sender, chatID int64, paths []string) []string {
 	return failures
 }
 
-func SendTaggedFile(bot sender, chatID int64, path string) error {
+func SendTaggedFile(bot sender, conversation chat.ConversationRef, path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("empty file path")
+	}
+	chatID, err := telegramChatID(conversation)
+	if err != nil {
+		return err
 	}
 	file := tb.FromDisk(path)
 	if IsPhotoPath(path) {
 		_, err := bot.Send(tb.ChatID(chatID), &tb.Photo{File: file})
 		return err
 	}
-	_, err := bot.Send(tb.ChatID(chatID), &tb.Document{
+	_, err = bot.Send(tb.ChatID(chatID), &tb.Document{
 		File:     file,
 		FileName: filepath.Base(path),
 	})
@@ -604,7 +483,8 @@ func IsPhotoPath(path string) bool {
 
 func DeliverJobResult(bot sender, job *PendingJob) error {
 	paths, text := SplitResponseFiles(job.Result)
-	failures := SendTaggedFiles(bot, job.ChatID, paths)
+	conversation := conversationFromID(job.ConversationID)
+	failures := SendTaggedFiles(bot, conversation, paths)
 	if len(failures) > 0 {
 		if text != "" {
 			text += "\n\n" + strings.Join(failures, "\n")
@@ -618,38 +498,39 @@ func DeliverJobResult(bot sender, job *PendingJob) error {
 	if text == "" {
 		return nil
 	}
-	return SendChunked(bot, job.ChatID, text)
+	return SendChunked(bot, conversation, text)
 }
 
-func SendImmediate(bot sender, chatID int64, text string) (int, bool) {
+func SendImmediate(bot sender, conversation chat.ConversationRef, text string) (string, bool) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return 0, true
+		return "", true
 	}
 
 	job := PendingJob{
-		UpdateID: dispatch.NewSyntheticJobID(),
-		ChatID:   chatID,
-		Status:   "ready",
-		Result:   text,
+		ID:             store.NewJobID(),
+		ConversationID: conversation.ID(),
+		Source:         string(conversation.Provider),
+		Status:         "ready",
+		Result:         html.EscapeString(text),
 	}
 	store.WriteJob(job)
 	ProcessJob(job, bot, nil, nil)
 
-	delivered := !store.JobExists(job.UpdateID)
+	delivered := !store.JobExists(job.ID)
 	if delivered {
-		log.Printf("delivered immediate job %d", job.UpdateID)
+		log.Printf("delivered immediate job %s", job.ID)
 	} else {
-		log.Printf("queued immediate job %d for retry", job.UpdateID)
+		log.Printf("queued immediate job %s for retry", job.ID)
 	}
-	return job.UpdateID, delivered
+	return job.ID, delivered
 }
 
-func newTypingStopper(bot sender, chatID int64, enabled bool) func() {
+func newTypingStopper(bot sender, conversation chat.ConversationRef, enabled bool) func() {
 	if !enabled {
 		return func() {}
 	}
-	stop := StartTyping(bot, chatID)
+	stop := StartTyping(bot, conversation)
 	var once sync.Once
 	return func() {
 		once.Do(stop)
@@ -657,7 +538,7 @@ func newTypingStopper(bot sender, chatID int64, enabled bool) func() {
 }
 
 func telegramDispatchCallbacks(bot sender, job *PendingJob, stopTyping func()) dispatch.Callbacks {
-	status := runningStatus{bot: bot, job: job}
+	status := newRunningStatus(bot, job)
 	if stopTyping == nil {
 		stopTyping = func() {}
 	}
@@ -679,45 +560,58 @@ func telegramDispatchCallbacks(bot sender, job *PendingJob, stopTyping func()) d
 }
 
 func ProcessJob(job PendingJob, bot sender, client *oneagent.Client, schedules *scheduler.Store) {
-	stopTyping := newTypingStopper(bot, job.ChatID, job.Status != "ready" && job.Status != "delivered")
+	stopTyping := newTypingStopper(bot, conversationFromID(job.ConversationID), job.Status != "ready" && job.Status != "delivered")
 	dispatch.ProcessJob(&job, client, schedules, telegramDispatchCallbacks(bot, &job, stopTyping))
 }
 
 func RecoverPendingJobs(bot sender, client *oneagent.Client, schedules *scheduler.Store) bool {
-	return dispatch.RecoverPendingJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
-		stopTyping := newTypingStopper(bot, job.ChatID, job.Status != "ready" && job.Status != "delivered")
+	maxRecovered := maxTelegramSourceEventID(store.ListJobs())
+	recovered := dispatch.RecoverPendingJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
+		stopTyping := newTypingStopper(bot, conversationFromID(job.ConversationID), job.Status != "ready" && job.Status != "delivered")
 		return telegramDispatchCallbacks(bot, job, stopTyping)
 	})
+	if maxRecovered > ReadCursor() {
+		WriteCursor(maxRecovered)
+	}
+	return recovered
 }
 
 func RetryDeliverableJobs(bot sender, client *oneagent.Client, schedules *scheduler.Store) bool {
 	return dispatch.RetryDeliverableJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
-		stopTyping := newTypingStopper(bot, job.ChatID, job.Status != "ready" && job.Status != "delivered")
+		stopTyping := newTypingStopper(bot, conversationFromID(job.ConversationID), job.Status != "ready" && job.Status != "delivered")
 		return telegramDispatchCallbacks(bot, job, stopTyping)
 	})
 }
 
 func HandleUpdate(u tb.Update, bot fileSender, cfg *store.Config, defaultCWD string, st store.State, client *oneagent.Client) {
+	conversation := ConfigConversation(*cfg)
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("panic in handleUpdate: %v", r)
-			SendImmediate(bot, cfg.ChatID, "Internal error — bot recovered.")
+			SendImmediate(bot, conversation, "Internal error — bot recovered.")
 		}
 	}()
 
-	if u.Message == nil || u.Message.Chat.ID != cfg.ChatID {
+	expectedChatID, err := telegramChatID(conversation)
+	if err != nil {
+		log.Printf("invalid telegram conversation: %v", err)
+		return
+	}
+	if u.Message == nil || u.Message.Chat.ID != expectedChatID {
 		return
 	}
 
 	text := u.Message.Text
 	if strings.HasPrefix(text, "/") {
-		base, _ := parseCommand(text)
-		if !isSupportedCommand(base) {
-			SendImmediate(bot, cfg.ChatID, "Unknown command. Try /new, /model, /cwd, /threads, or /compact.")
-			return
-		}
-		if reply := HandleCommand(text, client, cfg); reply != "" {
-			SendImmediate(bot, cfg.ChatID, reply)
+		result := chat.HandleInbound(chat.InboundMessage{
+			EventID:      strconv.Itoa(u.ID),
+			Source:       string(chat.ProviderTelegram),
+			Conversation: conversation,
+			SenderName:   senderName(u.Message.Sender),
+			Text:         text,
+		}, chatSettings(cfg), defaultCWD, st, client)
+		if result.ImmediateReply != "" {
+			SendImmediate(bot, conversation, result.ImmediateReply)
 		}
 		return
 	}
@@ -725,7 +619,7 @@ func HandleUpdate(u tb.Update, bot fileSender, cfg *store.Config, defaultCWD str
 	prompt, tempPath, err := BuildInboundPrompt(bot, u.Message)
 	if err != nil {
 		log.Printf("message processing error: %v", err)
-		SendImmediate(bot, cfg.ChatID, "Failed to process the incoming media.")
+		SendImmediate(bot, conversation, "Failed to process the incoming media.")
 		return
 	}
 	if prompt == "" {
@@ -733,17 +627,16 @@ func HandleUpdate(u tb.Update, bot fileSender, cfg *store.Config, defaultCWD str
 	}
 
 	log.Printf("message from %s: %s", senderName(u.Message.Sender), prompt)
-
-	cwd := st.CWD
-	if cwd == "" {
-		cwd = defaultCWD
+	result := chat.HandleInbound(chat.InboundMessage{
+		EventID:      strconv.Itoa(u.ID),
+		Source:       string(chat.ProviderTelegram),
+		Conversation: conversation,
+		SenderName:   senderName(u.Message.Sender),
+		Text:         u.Message.Text,
+		Prompt:       prompt,
+		TempPath:     tempPath,
+	}, chatSettings(cfg), defaultCWD, st, client)
+	if result.Job != nil {
+		ProcessJob(*result.Job, bot, client, nil)
 	}
-	ProcessJob(PendingJob{
-		UpdateID: u.ID,
-		ChatID:   cfg.ChatID,
-		Prompt:   prompt,
-		CWD:      cwd,
-		TempPath: tempPath,
-		State:    st,
-	}, bot, client, nil)
 }

@@ -75,10 +75,10 @@ func TestMarkDoneRemovesOneShot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add schedule: %v", err)
 	}
-	if _, err := store.AttachJob(sc.ID, -101); err != nil {
+	if _, err := store.AttachJob(sc.ID, "job-101"); err != nil {
 		t.Fatalf("attach job: %v", err)
 	}
-	if _, err := store.MarkDone(sc.ID, -101, time.Date(2026, 3, 18, 10, 0, 5, 0, now.Location())); err != nil {
+	if _, err := store.MarkDone(sc.ID, "job-101", time.Date(2026, 3, 18, 10, 0, 5, 0, now.Location())); err != nil {
 		t.Fatalf("mark done: %v", err)
 	}
 	if _, err := store.Get(sc.ID); err == nil {
@@ -102,10 +102,10 @@ func TestRecurringScheduleAdvancesAndRepairClearsMissingJobs(t *testing.T) {
 	}
 	next := sc.NextRun
 
-	if _, err := store.AttachJob(sc.ID, -202); err != nil {
+	if _, err := store.AttachJob(sc.ID, "job-202"); err != nil {
 		t.Fatalf("attach job: %v", err)
 	}
-	if err := store.Repair(func(int) bool { return false }); err != nil {
+	if err := store.Repair(func(string) bool { return false }); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
 
@@ -113,15 +113,15 @@ func TestRecurringScheduleAdvancesAndRepairClearsMissingJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get repaired schedule: %v", err)
 	}
-	if repaired.RunningJobID != 0 {
-		t.Fatalf("running job id = %d, want 0", repaired.RunningJobID)
+	if repaired.RunningJobID != "" {
+		t.Fatalf("running job id = %q, want empty", repaired.RunningJobID)
 	}
 
-	if _, err := store.AttachJob(sc.ID, -203); err != nil {
+	if _, err := store.AttachJob(sc.ID, "job-203"); err != nil {
 		t.Fatalf("reattach job: %v", err)
 	}
 	doneAt := time.Date(2026, 3, 18, 1, 5, 0, 0, now.Location())
-	advanced, err := store.MarkDone(sc.ID, -203, doneAt)
+	advanced, err := store.MarkDone(sc.ID, "job-203", doneAt)
 	if err != nil {
 		t.Fatalf("mark done: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestDueSortsAndSkipsRunningSchedules(t *testing.T) {
 		{ID: "future", NextRun: now.Add(1 * time.Hour), CreatedAt: now, Text: "future"},
 		{ID: "late", NextRun: late, CreatedAt: now.Add(2 * time.Second), Text: "late"},
 		{ID: "early", NextRun: early, CreatedAt: now.Add(1 * time.Second), Text: "early"},
-		{ID: "running", NextRun: early, CreatedAt: now, Text: "running", RunningJobID: 99},
+		{ID: "running", NextRun: early, CreatedAt: now, Text: "running", RunningJobID: "job-99"},
 	}
 	if err := store.save(schedules); err != nil {
 		t.Fatalf("save schedules: %v", err)
@@ -258,22 +258,22 @@ func TestDeleteAttachAndMarkDoneValidation(t *testing.T) {
 	if err := store.Delete("missing"); !os.IsNotExist(err) {
 		t.Fatalf("Delete(missing) err = %v, want os.ErrNotExist", err)
 	}
-	if _, err := store.AttachJob(sc.ID, 0); err == nil {
+	if _, err := store.AttachJob(sc.ID, ""); err == nil {
 		t.Fatal("expected AttachJob zero to fail")
 	}
-	if _, err := store.AttachJob("missing", 10); !os.IsNotExist(err) {
+	if _, err := store.AttachJob("missing", "job-10"); !os.IsNotExist(err) {
 		t.Fatalf("AttachJob(missing) err = %v, want os.ErrNotExist", err)
 	}
-	if _, err := store.AttachJob(sc.ID, 10); err != nil {
+	if _, err := store.AttachJob(sc.ID, "job-10"); err != nil {
 		t.Fatalf("AttachJob(): %v", err)
 	}
-	if err := store.Delete(sc.ID); err == nil || !strings.Contains(err.Error(), "is running via job 10") {
+	if err := store.Delete(sc.ID); err == nil || !strings.Contains(err.Error(), "is running via job job-10") {
 		t.Fatalf("Delete(running) err = %v", err)
 	}
-	if _, err := store.AttachJob(sc.ID, 11); err == nil {
+	if _, err := store.AttachJob(sc.ID, "job-11"); err == nil {
 		t.Fatal("expected duplicate AttachJob to fail")
 	}
-	if _, err := store.MarkDone(sc.ID, 12, now.Add(time.Hour)); err == nil {
+	if _, err := store.MarkDone(sc.ID, "job-12", now.Add(time.Hour)); err == nil {
 		t.Fatal("expected MarkDone wrong job to fail")
 	}
 }
