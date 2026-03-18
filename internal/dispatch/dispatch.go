@@ -19,6 +19,18 @@ var (
 	runModelFunc = RunModel
 )
 
+func SetRunModelFuncForTest(fn func(*store.PendingJob, *oneagent.Client, func(string)) (string, bool)) func() {
+	prev := runModelFunc
+	if fn == nil {
+		runModelFunc = RunModel
+	} else {
+		runModelFunc = fn
+	}
+	return func() {
+		runModelFunc = prev
+	}
+}
+
 type Callbacks struct {
 	OnActivity    func(activity string)
 	OnResult      func(result string) error
