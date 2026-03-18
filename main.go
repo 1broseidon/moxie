@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"html"
 	"io"
@@ -13,11 +14,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/1broseidon/oneagent"
+	"github.com/george/tele/scheduler"
 	tele "gopkg.in/telebot.v4"
 )
 
@@ -76,6 +79,7 @@ type State struct {
 
 type PendingJob struct {
 	UpdateID          int       `json:"update_id"`
+	ScheduleID        string    `json:"schedule_id,omitempty"`
 	ChatID            int64     `json:"chat_id"`
 	Prompt            string    `json:"prompt"`
 	CWD               string    `json:"cwd,omitempty"`
@@ -141,6 +145,11 @@ func removeJob(updateID int) {
 	if err != nil && !os.IsNotExist(err) {
 		log.Printf("error: remove job %d: %v", updateID, err)
 	}
+}
+
+func jobExists(updateID int) bool {
+	_, err := os.Stat(jobFile(updateID))
+	return err == nil
 }
 
 func cleanupJobTemp(job PendingJob) {
@@ -223,17 +232,25 @@ func senderName(u *tele.User) string {
 const teleSystemPrompt = `You are responding via a Telegram bot. Format all replies using Telegram HTML.
 Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <a href="url">link</a>.
 No markdown. No unsupported tags. Keep replies concise.
-To send a local file back to Telegram, include <send>/absolute/path/to/file</send> in your reply. The tag is stripped from the visible text and the file is uploaded separately.`
+To send a local file back to Telegram, include <send>/absolute/path/to/file</send> in your reply. The tag is stripped from the visible text and the file is uploaded separately.
+Only use the tele schedule CLI when the user is explicitly asking to create, inspect, modify, or delete a future or recurring schedule. Do not use it for normal replies or immediate tasks.
+For relative one-shot schedules, prefer --in like 5m, 2h, or 1d2h30m. For exact one-shot times, use --at with an exact RFC3339 timestamp and offset. For recurring schedules, use --cron.
+Use action send for fixed reminder messages and action dispatch for scheduled agent work. You can inspect schedules with tele schedule list and remove them with tele schedule rm <id>.`
 
 var (
 	sendTagPattern  = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
 	unsafeFileChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+	dispatchMu      sync.Mutex
 	shuttingDown    atomic.Bool
 )
 
 func injectSystemPrompt(client *oneagent.Client) {
 	for name, b := range client.Backends {
-		b.SystemPrompt = teleSystemPrompt
+		if strings.TrimSpace(b.SystemPrompt) != "" {
+			b.SystemPrompt = strings.TrimSpace(b.SystemPrompt) + "\n\n" + teleSystemPrompt
+		} else {
+			b.SystemPrompt = teleSystemPrompt
+		}
 		client.Backends[name] = b
 	}
 }
@@ -375,6 +392,8 @@ func main() {
 		cmdPoll()
 	case "cursor":
 		cmdCursor()
+	case "schedule":
+		cmdSchedule()
 	case "serve":
 		cmdServe()
 	case "help", "--help", "-h":
@@ -398,6 +417,7 @@ Usage:
   tele cursor                            Show current cursor position
   tele cursor set <update_id>            Manually set cursor
   tele cursor reset                      Reset cursor to 0
+  tele schedule <subcommand>             Manage schedules
   tele serve [--cwd <dir>]               Long-poll and dispatch to agent backends`)
 }
 
@@ -513,6 +533,226 @@ func cmdCursor() {
 	} else {
 		fmt.Printf("cursor: %d\n", c)
 	}
+}
+
+func newScheduleStore() *scheduler.Store {
+	return scheduler.NewStore(configFile("schedules.json"), time.Local)
+}
+
+func cmdSchedule() {
+	if len(os.Args) < 3 {
+		scheduleUsage()
+		return
+	}
+
+	store := newScheduleStore()
+	switch os.Args[2] {
+	case "add":
+		cmdScheduleAdd(store, os.Args[3:])
+	case "list", "ls":
+		cmdScheduleList(store)
+	case "show":
+		cmdScheduleShow(store, os.Args[3:])
+	case "rm", "delete":
+		cmdScheduleDelete(store, os.Args[3:])
+	case "help", "--help", "-h":
+		scheduleUsage()
+	default:
+		fatal("unknown schedule subcommand: %s", os.Args[2])
+	}
+}
+
+func scheduleUsage() {
+	fmt.Println(`tele schedule
+
+Usage:
+  tele schedule add --action send --in 5m --text "Call John"
+  tele schedule add --action send --at 2026-03-18T10:00:00-05:00 --text "Call John"
+  tele schedule add --action dispatch --cron "0 1 * * *" --text "Run a security scan"
+  tele schedule list
+  tele schedule show <id>
+  tele schedule rm <id>
+
+Notes:
+  --action is required: send or dispatch
+  Use exactly one of --in, --at, or --cron
+  Dispatch schedules capture backend/model/thread/cwd at creation time unless overridden`)
+}
+
+func cmdScheduleAdd(store *scheduler.Store, args []string) {
+	fs := flag.NewFlagSet("schedule add", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	action := fs.String("action", "", "")
+	in := fs.String("in", "", "")
+	at := fs.String("at", "", "")
+	cronSpec := fs.String("cron", "", "")
+	text := fs.String("text", "", "")
+	cwdFlag := fs.String("cwd", "", "")
+	backendFlag := fs.String("backend", "", "")
+	modelFlag := fs.String("model", "", "")
+	threadFlag := fs.String("thread", "", "")
+
+	if err := fs.Parse(args); err != nil {
+		fatal("usage: tele schedule add --action <send|dispatch> (--in <duration>|--at <time>|--cron <spec>) --text <text>")
+	}
+	if fs.NArg() > 0 {
+		fatal("unexpected schedule add args: %s", strings.Join(fs.Args(), " "))
+	}
+
+	var trigger scheduler.Trigger
+	switch {
+	case *in != "" && *at != "":
+		fatal("use exactly one of --in, --at, or --cron")
+	case *in != "" && *cronSpec != "":
+		fatal("use exactly one of --in, --at, or --cron")
+	case *at != "" && *cronSpec != "":
+		fatal("use exactly one of --in, --at, or --cron")
+	case *in != "":
+		trigger = scheduler.TriggerAt
+	case *at != "":
+		trigger = scheduler.TriggerAt
+	case *cronSpec != "":
+		trigger = scheduler.TriggerCron
+	default:
+		fatal("missing schedule trigger: use --in, --at, or --cron")
+	}
+
+	state := readState()
+	input := scheduler.AddInput{
+		Trigger:  trigger,
+		Action:   scheduler.Action(strings.TrimSpace(*action)),
+		In:       *in,
+		At:       *at,
+		Cron:     *cronSpec,
+		Text:     *text,
+		Backend:  state.Backend,
+		Model:    state.Model,
+		ThreadID: state.ThreadID,
+		CWD:      state.CWD,
+	}
+
+	if strings.TrimSpace(*backendFlag) != "" {
+		input.Backend = strings.TrimSpace(*backendFlag)
+	}
+	if strings.TrimSpace(*modelFlag) != "" {
+		input.Model = strings.TrimSpace(*modelFlag)
+	}
+	if strings.TrimSpace(*threadFlag) != "" {
+		input.ThreadID = strings.TrimSpace(*threadFlag)
+	}
+	if strings.TrimSpace(*cwdFlag) != "" {
+		resolved, err := resolveDir(*cwdFlag)
+		if err != nil {
+			fatal("invalid --cwd: %v", err)
+		}
+		input.CWD = resolved
+	}
+
+	if input.Action == scheduler.ActionSend {
+		input.Backend = ""
+		input.Model = ""
+		input.ThreadID = ""
+		input.CWD = ""
+	}
+
+	sc, err := store.Add(input)
+	if err != nil {
+		fatal("schedule add failed: %v", err)
+	}
+
+	fmt.Printf("scheduled %s\n%s\n", sc.ID, renderSchedule(sc))
+}
+
+func cmdScheduleList(store *scheduler.Store) {
+	schedules, err := store.List()
+	if err != nil {
+		fatal("schedule list failed: %v", err)
+	}
+	if len(schedules) == 0 {
+		fmt.Println("no schedules")
+		return
+	}
+	for _, sc := range schedules {
+		fmt.Printf("%s  %s  %s\n", sc.ID, formatScheduleHeadline(sc), truncateRunes(sc.Text, 80))
+	}
+}
+
+func cmdScheduleShow(store *scheduler.Store, args []string) {
+	if len(args) != 1 {
+		fatal("usage: tele schedule show <id>")
+	}
+	sc, err := store.Get(strings.TrimSpace(args[0]))
+	if err != nil {
+		if os.IsNotExist(err) {
+			fatal("unknown schedule: %s", args[0])
+		}
+		fatal("schedule show failed: %v", err)
+	}
+	fmt.Println(renderSchedule(sc))
+}
+
+func cmdScheduleDelete(store *scheduler.Store, args []string) {
+	if len(args) != 1 {
+		fatal("usage: tele schedule rm <id>")
+	}
+	id := strings.TrimSpace(args[0])
+	if err := store.Delete(id); err != nil {
+		if os.IsNotExist(err) {
+			fatal("unknown schedule: %s", id)
+		}
+		fatal("schedule rm failed: %v", err)
+	}
+	fmt.Printf("removed %s\n", id)
+}
+
+func formatScheduleHeadline(sc scheduler.Schedule) string {
+	switch sc.Trigger {
+	case scheduler.TriggerAt:
+		return fmt.Sprintf("%s at %s", sc.Action, formatScheduleTime(sc.NextRun))
+	case scheduler.TriggerCron:
+		return fmt.Sprintf("%s cron %s next %s", sc.Action, sc.Cron, formatScheduleTime(sc.NextRun))
+	default:
+		return fmt.Sprintf("%s next %s", sc.Action, formatScheduleTime(sc.NextRun))
+	}
+}
+
+func renderSchedule(sc scheduler.Schedule) string {
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "ID: %s\n", sc.ID)
+	fmt.Fprintf(&buf, "Action: %s\n", sc.Action)
+	switch sc.Trigger {
+	case scheduler.TriggerAt:
+		fmt.Fprintf(&buf, "Trigger: at %s\n", formatScheduleTime(sc.At))
+	case scheduler.TriggerCron:
+		fmt.Fprintf(&buf, "Trigger: cron %s\n", sc.Cron)
+	}
+	fmt.Fprintf(&buf, "Next run: %s\n", formatScheduleTime(sc.NextRun))
+	if !sc.LastRun.IsZero() {
+		fmt.Fprintf(&buf, "Last run: %s\n", formatScheduleTime(sc.LastRun))
+	}
+	if sc.RunningJobID != 0 {
+		fmt.Fprintf(&buf, "Running job: %d\n", sc.RunningJobID)
+	}
+	if sc.Action == scheduler.ActionDispatch {
+		fmt.Fprintf(&buf, "Backend: %s\n", sc.Backend)
+		if sc.Model != "" {
+			fmt.Fprintf(&buf, "Model: %s\n", sc.Model)
+		}
+		fmt.Fprintf(&buf, "Thread: %s\n", sc.ThreadID)
+		if sc.CWD != "" {
+			fmt.Fprintf(&buf, "CWD: %s\n", sc.CWD)
+		}
+	}
+	fmt.Fprintf(&buf, "Text: %s\n", sc.Text)
+	return strings.TrimSpace(buf.String())
+}
+
+func formatScheduleTime(t time.Time) string {
+	if t.IsZero() {
+		return "(none)"
+	}
+	return t.In(time.Local).Format("2006-01-02 15:04 MST")
 }
 
 // --- Slash commands ---
@@ -1013,9 +1253,12 @@ func deliverJobResult(bot *tele.Bot, job PendingJob) {
 	sendChunked(bot, job.ChatID, text)
 }
 
-func processJob(job PendingJob, bot *tele.Bot, client *oneagent.Client) {
+func processJob(job PendingJob, bot *tele.Bot, client *oneagent.Client, schedules *scheduler.Store) {
+	dispatchMu.Lock()
+	defer dispatchMu.Unlock()
+
 	status := runningStatus{bot: bot, job: &job}
-	if job.Status != "ready" {
+	if job.Status != "ready" && job.Status != "delivered" {
 		job.Status = "running"
 		writeJob(job)
 		result, interrupted := runModel(&job, bot, client, status)
@@ -1027,7 +1270,17 @@ func processJob(job PendingJob, bot *tele.Bot, client *oneagent.Client) {
 		writeJob(job)
 	}
 	status.clear()
-	deliverJobResult(bot, job)
+	if job.Status != "delivered" {
+		deliverJobResult(bot, job)
+		job.Status = "delivered"
+		writeJob(job)
+	}
+	if job.ScheduleID != "" && schedules != nil {
+		if _, err := schedules.MarkDone(job.ScheduleID, job.UpdateID, time.Now()); err != nil {
+			log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
+			return
+		}
+	}
 	cleanupJobTemp(job)
 	removeJob(job.UpdateID)
 }
@@ -1046,7 +1299,7 @@ func canRetryJob(job PendingJob) bool {
 	return false
 }
 
-func recoverPendingJobs(bot *tele.Bot, client *oneagent.Client) bool {
+func recoverPendingJobs(bot *tele.Bot, client *oneagent.Client, schedules *scheduler.Store) bool {
 	jobs := listJobs()
 	if len(jobs) == 0 {
 		return false
@@ -1057,7 +1310,13 @@ func recoverPendingJobs(bot *tele.Bot, client *oneagent.Client) bool {
 		switch job.Status {
 		case "ready":
 			log.Printf("replaying ready job %d", job.UpdateID)
-			processJob(job, bot, client)
+			processJob(job, bot, client, schedules)
+			if job.UpdateID > maxRecovered {
+				maxRecovered = job.UpdateID
+			}
+		case "delivered":
+			log.Printf("finalizing delivered job %d", job.UpdateID)
+			processJob(job, bot, client, schedules)
 			if job.UpdateID > maxRecovered {
 				maxRecovered = job.UpdateID
 			}
@@ -1069,7 +1328,7 @@ func recoverPendingJobs(bot *tele.Bot, client *oneagent.Client) bool {
 				continue
 			}
 			log.Printf("retrying interrupted job %d", job.UpdateID)
-			processJob(job, bot, client)
+			processJob(job, bot, client, schedules)
 			if job.UpdateID > maxRecovered {
 				maxRecovered = job.UpdateID
 			}
@@ -1083,6 +1342,94 @@ func recoverPendingJobs(bot *tele.Bot, client *oneagent.Client) bool {
 		writeCursor(maxRecovered)
 	}
 	return true
+}
+
+func newSyntheticJobID() int {
+	n := time.Now().UnixNano()
+	if n < 0 {
+		n = -n
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if n > maxInt {
+		n %= maxInt
+	}
+	if n == 0 {
+		n = 1
+	}
+	return -int(n)
+}
+
+func scheduleState(sc scheduler.Schedule) State {
+	st := State{
+		Backend:  sc.Backend,
+		Model:    sc.Model,
+		ThreadID: sc.ThreadID,
+		CWD:      sc.CWD,
+	}
+	if st.Backend == "" {
+		st.Backend = "claude"
+	}
+	if st.ThreadID == "" {
+		st.ThreadID = "telegram"
+	}
+	return st
+}
+
+func runDueSchedules(bot *tele.Bot, client *oneagent.Client, schedules *scheduler.Store, chatID int64) {
+	due, err := schedules.Due(time.Now())
+	if err != nil {
+		log.Printf("schedule due check failed: %v", err)
+		return
+	}
+	for _, sc := range due {
+		job := PendingJob{
+			UpdateID:   newSyntheticJobID(),
+			ScheduleID: sc.ID,
+			ChatID:     chatID,
+			CWD:        sc.CWD,
+			State:      scheduleState(sc),
+		}
+		switch sc.Action {
+		case scheduler.ActionSend:
+			job.Status = "ready"
+			job.Result = sc.Text
+		case scheduler.ActionDispatch:
+			job.Prompt = sc.Text
+		default:
+			log.Printf("unknown schedule action %q for %s", sc.Action, sc.ID)
+			continue
+		}
+
+		writeJob(job)
+		if _, err := schedules.AttachJob(sc.ID, job.UpdateID); err != nil {
+			log.Printf("schedule attach failed for %s: %v", sc.ID, err)
+			removeJob(job.UpdateID)
+			continue
+		}
+
+		log.Printf("running schedule %s via job %d", sc.ID, job.UpdateID)
+		processJob(job, bot, client, schedules)
+		if shuttingDown.Load() {
+			return
+		}
+	}
+}
+
+func startScheduleLoop(bot *tele.Bot, client *oneagent.Client, schedules *scheduler.Store, chatID int64) {
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		runDueSchedules(bot, client, schedules, chatID)
+		for {
+			select {
+			case <-ticker.C:
+				if shuttingDown.Load() {
+					return
+				}
+				runDueSchedules(bot, client, schedules, chatID)
+			}
+		}
+	}()
 }
 
 // --- Update handler ---
@@ -1135,7 +1482,7 @@ func handleUpdate(u tele.Update, bot *tele.Bot, cfg *Config, defaultCWD string, 
 		CWD:      cwd,
 		TempPath: tempPath,
 		State:    st,
-	}, bot, client)
+	}, bot, client, nil)
 }
 
 func cmdServe() {
@@ -1165,11 +1512,16 @@ func cmdServe() {
 		fatal("bot init failed: %v", err)
 	}
 
-	hadPendingJobs := recoverPendingJobs(bot, client)
-	if !hadPendingJobs {
+	schedules := newScheduleStore()
+	if err := schedules.Repair(jobExists); err != nil {
+		log.Printf("schedule repair failed: %v", err)
+	}
+	recoverPendingJobs(bot, client, schedules)
+	if readCursor() == 0 {
 		seedCursor(bot)
 	}
 	registerCommands(bot)
+	startScheduleLoop(bot, client, schedules, cfg.ChatID)
 
 	cursor := readCursor()
 	st := readState()
