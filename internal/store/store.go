@@ -19,6 +19,7 @@ type Config struct {
 type ChannelConfig struct {
 	Provider  string `json:"provider"`
 	Token     string `json:"token,omitempty"`
+	AppToken  string `json:"app_token,omitempty"`
 	ChannelID string `json:"channel_id,omitempty"`
 }
 
@@ -72,8 +73,8 @@ func LoadConfig() (Config, error) {
 			ChannelID: fmt.Sprintf("%d", file.ChatID),
 		}
 	}
-	if _, err := cfg.Telegram(); err != nil {
-		return Config{}, fmt.Errorf("%w\nRun: moxie init", err)
+	if !cfg.hasValidChannel() {
+		return Config{}, fmt.Errorf("config missing at least one valid channel\nRun: moxie init")
 	}
 	return cfg, nil
 }
@@ -88,8 +89,8 @@ func SaveConfig(cfg Config) {
 }
 
 func (cfg Config) Telegram() (ChannelConfig, error) {
-	tg, ok := cfg.Channels["telegram"]
-	if !ok {
+	tg, err := cfg.channel("telegram")
+	if err != nil {
 		return ChannelConfig{}, fmt.Errorf("config missing telegram channel")
 	}
 	if tg.Provider == "" {
@@ -102,6 +103,58 @@ func (cfg Config) Telegram() (ChannelConfig, error) {
 		return ChannelConfig{}, fmt.Errorf("config missing telegram channel_id")
 	}
 	return tg, nil
+}
+
+func (cfg Config) Slack() (ChannelConfig, error) {
+	slack, err := cfg.channel("slack")
+	if err != nil {
+		return ChannelConfig{}, fmt.Errorf("config missing slack channel")
+	}
+	if slack.Provider == "" {
+		slack.Provider = "slack"
+	}
+	if slack.Token == "" {
+		return ChannelConfig{}, fmt.Errorf("config missing slack token")
+	}
+	if slack.AppToken == "" {
+		return ChannelConfig{}, fmt.Errorf("config missing slack app_token")
+	}
+	return slack, nil
+}
+
+func (cfg Config) channel(name string) (ChannelConfig, error) {
+	c, ok := cfg.Channels[name]
+	if !ok {
+		return ChannelConfig{}, fmt.Errorf("config missing %s channel", name)
+	}
+	return c, nil
+}
+
+func (cfg Config) hasValidChannel() bool {
+	for name, ch := range cfg.Channels {
+		if channelIsValid(name, ch) {
+			return true
+		}
+	}
+	return false
+}
+
+func channelProvider(name string, ch ChannelConfig) string {
+	if ch.Provider != "" {
+		return ch.Provider
+	}
+	return name
+}
+
+func channelIsValid(name string, ch ChannelConfig) bool {
+	switch channelProvider(name, ch) {
+	case "telegram":
+		return ch.Token != "" && ch.ChannelID != ""
+	case "slack":
+		return ch.Token != "" && ch.AppToken != ""
+	default:
+		return false
+	}
 }
 
 type State struct {

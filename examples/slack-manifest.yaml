@@ -1,0 +1,33 @@
+_metadata:
+  major_version: 1
+display_information:
+  name: Moxie
+  description: Self-hosted chat interface for Moxie
+features:
+  bot_user:
+    display_name: Moxie
+    always_online: false
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  slash_commands:
+    - command: /moxie
+      description: Run native Moxie commands
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write
+      - app_mentions:read
+      - commands
+      - im:history
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+  socket_mode_enabled: true
+  org_deploy_enabled: false
+  is_hosted: false
+  token_rotation_enabled: false

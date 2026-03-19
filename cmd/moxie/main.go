@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,8 +16,10 @@ import (
 	"time"
 
 	botpkg "github.com/1broseidon/moxie/internal/bot"
+	"github.com/1broseidon/moxie/internal/chat"
 	"github.com/1broseidon/moxie/internal/dispatch"
 	"github.com/1broseidon/moxie/internal/scheduler"
+	slackpkg "github.com/1broseidon/moxie/internal/slack"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
 	tb "gopkg.in/telebot.v4"
@@ -75,7 +78,7 @@ Usage:
   moxie cursor reset                      Reset cursor to 0
   moxie schedule <subcommand>             Manage schedules
   moxie threads show <id>                 Show turns for a thread
-  moxie serve [--cwd <dir>]               Long-poll and dispatch to agent backends`)
+  moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run a chat transport and dispatch to agent backends`)
 }
 
 func cmdInit() {
@@ -115,17 +118,49 @@ func cmdInit() {
 }
 
 func cmdSend() {
-	if len(os.Args) < 3 {
+	msg := strings.TrimSpace(joinArgsExcludingTransport(2))
+	if msg == "" {
 		fatal("usage: moxie send <message>")
 	}
-	msg := strings.Join(os.Args[2:], " ")
-	cfg, bot := mustConfigAndBot()
-	jobID, delivered := botpkg.SendImmediate(bot, botpkg.ConfigConversation(cfg), msg)
-	if delivered {
-		fmt.Println("sent")
-		return
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		fatal("%v", err)
 	}
-	fmt.Printf("queued for retry (job %s)\n", jobID)
+	transport, err := chooseServeTransport(cfg, parseTransportFlag(2))
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	switch transport {
+	case "telegram":
+		bot, err := botpkg.NewBot(cfg)
+		if err != nil {
+			fatal("bot init failed: %v", err)
+		}
+		jobID, delivered := botpkg.SendImmediate(bot, botpkg.ConfigConversation(cfg), msg)
+		if delivered {
+			fmt.Println("sent")
+			return
+		}
+		fmt.Printf("queued for retry (job %s)\n", jobID)
+	case "slack":
+		conversation := slackDefaultConversation(cfg)
+		if conversation.ChannelID == "" {
+			fatal("slack send requires channels.slack.channel_id")
+		}
+		adapter, err := slackpkg.New(&cfg, "", nil, nil)
+		if err != nil {
+			fatal("slack init failed: %v", err)
+		}
+		jobID, delivered := slackpkg.SendImmediate(adapter.API(), conversation, msg)
+		if delivered {
+			fmt.Println("sent")
+			return
+		}
+		fmt.Printf("queued for retry (job %s)\n", jobID)
+	default:
+		fatal("unsupported transport: %s", transport)
+	}
 }
 
 func mustConfigAndBot() (store.Config, *tb.Bot) {
@@ -464,12 +499,49 @@ func formatScheduleTime(t time.Time) string {
 // --- Serve loop ---
 
 func parseServeFlags() string {
+	return parseServeTransportAndCWD().cwd
+}
+
+type serveFlags struct {
+	cwd       string
+	transport string
+}
+
+func parseServeTransportAndCWD() serveFlags {
+	flags := serveFlags{}
 	for i := 2; i < len(os.Args); i++ {
 		if os.Args[i] == "--cwd" && i+1 < len(os.Args) {
-			return os.Args[i+1]
+			flags.cwd = os.Args[i+1]
+			i++
+			continue
+		}
+		if os.Args[i] == "--transport" && i+1 < len(os.Args) {
+			flags.transport = strings.TrimSpace(os.Args[i+1])
+			i++
+		}
+	}
+	return flags
+}
+
+func parseTransportFlag(startIdx int) string {
+	for i := startIdx; i < len(os.Args); i++ {
+		if os.Args[i] == "--transport" && i+1 < len(os.Args) {
+			return strings.TrimSpace(os.Args[i+1])
 		}
 	}
 	return ""
+}
+
+func joinArgsExcludingTransport(startIdx int) string {
+	args := make([]string, 0, len(os.Args)-startIdx)
+	for i := startIdx; i < len(os.Args); i++ {
+		if os.Args[i] == "--transport" && i+1 < len(os.Args) {
+			i++
+			continue
+		}
+		args = append(args, os.Args[i])
+	}
+	return strings.Join(args, " ")
 }
 
 func expandHome(path string) string {
@@ -594,13 +666,128 @@ func startDeliveryRetryLoop(bot *tb.Bot, client *oneagent.Client, schedules *sch
 	}()
 }
 
+func runDueSchedulesSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+	due, err := schedules.Due(time.Now())
+	if err != nil {
+		log.Printf("schedule due check failed: %v", err)
+		return
+	}
+	for _, sc := range due {
+		job := store.PendingJob{
+			ID:             store.NewJobID(),
+			ScheduleID:     sc.ID,
+			ConversationID: conversationID,
+			Source:         "schedule",
+			CWD:            sc.CWD,
+			State:          scheduleState(sc),
+		}
+		switch sc.Action {
+		case scheduler.ActionSend:
+			job.Status = "ready"
+			job.Result = sc.Text
+		case scheduler.ActionDispatch:
+			job.Prompt = sc.Text
+		default:
+			log.Printf("unknown schedule action %q for %s", sc.Action, sc.ID)
+			continue
+		}
+
+		store.WriteJob(job)
+		if _, err := schedules.AttachJob(sc.ID, job.ID); err != nil {
+			log.Printf("schedule attach failed for %s: %v", sc.ID, err)
+			store.RemoveJob(job.ID)
+			continue
+		}
+
+		log.Printf("running schedule %s via job %s", sc.ID, job.ID)
+		slackpkg.ProcessJob(job, api, client, schedules)
+		if dispatch.IsShuttingDown() {
+			return
+		}
+	}
+}
+
+func startScheduleLoopSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		runDueSchedulesSlack(api, client, schedules, conversationID)
+		for {
+			select {
+			case <-ticker.C:
+				if dispatch.IsShuttingDown() {
+					return
+				}
+				runDueSchedulesSlack(api, client, schedules, conversationID)
+			}
+		}
+	}()
+}
+
+func startDeliveryRetryLoopSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store) {
+	ticker := time.NewTicker(15 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if dispatch.IsShuttingDown() {
+					return
+				}
+				slackpkg.RetryDeliverableJobs(api, client, schedules)
+			}
+		}
+	}()
+}
+
+func chooseServeTransport(cfg store.Config, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		switch requested {
+		case "telegram":
+			if _, err := cfg.Telegram(); err != nil {
+				return "", err
+			}
+			return requested, nil
+		case "slack":
+			if _, err := cfg.Slack(); err != nil {
+				return "", err
+			}
+			return requested, nil
+		default:
+			return "", fmt.Errorf("unknown transport: %s", requested)
+		}
+	}
+
+	hasTelegram := false
+	if _, err := cfg.Telegram(); err == nil {
+		hasTelegram = true
+	}
+	hasSlack := false
+	if _, err := cfg.Slack(); err == nil {
+		hasSlack = true
+	}
+
+	switch {
+	case hasTelegram && !hasSlack:
+		return "telegram", nil
+	case hasSlack && !hasTelegram:
+		return "slack", nil
+	case hasSlack && hasTelegram:
+		return "", fmt.Errorf("multiple transports configured; use --transport telegram or --transport slack")
+	default:
+		return "", fmt.Errorf("no valid transport configured")
+	}
+}
+
 func cmdServe() {
 	cfg, err := store.LoadConfig()
 	if err != nil {
 		fatal("%v", err)
 	}
 
-	defaultCWD := parseServeFlags()
+	flags := parseServeTransportAndCWD()
+	defaultCWD := flags.cwd
 	if defaultCWD != "" {
 		defaultCWD, err = resolveDir(defaultCWD)
 		if err != nil {
@@ -614,6 +801,49 @@ func cmdServe() {
 	}
 
 	client := &oneagent.Client{Backends: backends}
+	schedules := newScheduleStore()
+	if err := schedules.Repair(store.JobExists); err != nil {
+		log.Printf("schedule repair failed: %v", err)
+	}
+	transport, err := chooseServeTransport(cfg, flags.transport)
+	if err != nil {
+		fatal("%v", err)
+	}
+
+	switch transport {
+	case "telegram":
+		cmdServeTelegram(cfg, defaultCWD, client, schedules)
+	case "slack":
+		cmdServeSlack(cfg, defaultCWD, client, schedules)
+	default:
+		fatal("unsupported transport: %s", transport)
+	}
+}
+
+func installSignalHandler() {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		dispatch.SetShuttingDown(true)
+		log.Println("shutdown requested; draining current work")
+	}()
+}
+
+func installSignalHandlerWithCancel(cancel func()) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		dispatch.SetShuttingDown(true)
+		if cancel != nil {
+			cancel()
+		}
+		log.Println("shutdown requested; draining current work")
+	}()
+}
+
+func cmdServeTelegram(cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) {
 	botpkg.ApplySystemPrompt(client.Backends)
 
 	bot, err := botpkg.NewBot(cfg)
@@ -621,10 +851,6 @@ func cmdServe() {
 		fatal("bot init failed: %v", err)
 	}
 
-	schedules := newScheduleStore()
-	if err := schedules.Repair(store.JobExists); err != nil {
-		log.Printf("schedule repair failed: %v", err)
-	}
 	botpkg.RecoverPendingJobs(bot, client, schedules)
 	if botpkg.ReadCursor() == 0 {
 		botpkg.SeedCursor(bot, getUpdates)
@@ -635,15 +861,8 @@ func cmdServe() {
 
 	cursor := botpkg.ReadCursor()
 	st := store.ReadState()
-	log.Printf("serving — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		dispatch.SetShuttingDown(true)
-		log.Println("shutdown requested; draining current work")
-	}()
+	log.Printf("serving telegram — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
+	installSignalHandler()
 
 	offset := func() int {
 		if cursor > 0 {
@@ -669,6 +888,43 @@ func cmdServe() {
 		}
 	}
 	log.Println("shutting down")
+}
+
+func slackDefaultConversation(cfg store.Config) chat.ConversationRef {
+	ch, err := cfg.Slack()
+	if err != nil {
+		return chat.ConversationRef{Provider: chat.ProviderSlack}
+	}
+	return chat.ConversationRef{
+		Provider:  chat.ProviderSlack,
+		ChannelID: ch.ChannelID,
+	}
+}
+
+func cmdServeSlack(cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) {
+	slackpkg.ApplySystemPrompt(client.Backends)
+
+	adapter, err := slackpkg.New(&cfg, defaultCWD, client, schedules)
+	if err != nil {
+		fatal("slack init failed: %v", err)
+	}
+
+	slackpkg.RecoverPendingJobs(adapter.API(), client, schedules)
+	defaultConversation := slackDefaultConversation(cfg)
+	if defaultConversation.ChannelID != "" {
+		startScheduleLoopSlack(adapter.API(), client, schedules, defaultConversation.ID())
+	}
+	startDeliveryRetryLoopSlack(adapter.API(), client, schedules)
+
+	st := store.ReadState()
+	log.Printf("serving slack — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	installSignalHandlerWithCancel(cancel)
+
+	if err := adapter.Run(ctx); err != nil && !dispatch.IsShuttingDown() {
+		fatal("slack serve failed: %v", err)
+	}
 }
 
 // --- Message display (for CLI subcommands) ---

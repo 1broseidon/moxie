@@ -125,8 +125,8 @@ type runningStatus struct {
 	st  telegramStatusState
 }
 
-func newRunningStatus(bot sender, job *PendingJob) runningStatus {
-	return runningStatus{
+func newRunningStatus(bot sender, job *PendingJob) *runningStatus {
+	return &runningStatus{
 		bot: bot,
 		job: job,
 		st:  readStatus(job.ID),
@@ -173,7 +173,7 @@ func telegramChatID(ref chat.ConversationRef) (int64, error) {
 	return chatID, nil
 }
 
-func (s runningStatus) show(activity string) {
+func (s *runningStatus) show(activity string) {
 	text := renderActivityHTML(activity)
 	if text == s.st.HTML {
 		return
@@ -213,7 +213,7 @@ func (s runningStatus) show(activity string) {
 	writeStatus(s.job.ID, s.st)
 }
 
-func (s runningStatus) clear() {
+func (s *runningStatus) clear() {
 	if s.st.Message.MessageID != "" {
 		chatID, err := telegramChatID(s.st.Message.Conversation)
 		if err != nil {

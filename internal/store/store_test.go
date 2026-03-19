@@ -21,18 +21,51 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 		t.Fatal("expected missing config error")
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"chat_id":123}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := LoadConfig(); err == nil || err.Error() != "config missing telegram channel\nRun: moxie init" {
-		t.Fatalf("LoadConfig() missing token err = %v", err)
+	if _, err := LoadConfig(); err == nil || err.Error() != "config missing at least one valid channel\nRun: moxie init" {
+		t.Fatalf("LoadConfig() empty config err = %v", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"token":"abc"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"channels":{"slack":{"provider":"slack","app_token":"xapp-123"}}}`), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := LoadConfig(); err == nil || err.Error() != "config missing telegram channel\nRun: moxie init" {
-		t.Fatalf("LoadConfig() missing chat_id err = %v", err)
+	if _, err := LoadConfig(); err == nil || err.Error() != "config missing at least one valid channel\nRun: moxie init" {
+		t.Fatalf("LoadConfig() partial slack config err = %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"channels":{"slack":{"token":"xoxb-123","app_token":"xapp-123"}}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() slack-only config: %v", err)
+	}
+	slack, err := cfg.Slack()
+	if err != nil {
+		t.Fatalf("Slack() = %v", err)
+	}
+	if slack.Provider != "slack" || slack.Token != "xoxb-123" || slack.AppToken != "xapp-123" {
+		t.Fatalf("LoadConfig() slack = %+v, want token/app_token preserved", slack)
+	}
+	if cfg.Workspaces == nil {
+		t.Fatal("expected workspaces map to be initialized")
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"token":"abc","chat_id":123}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig() legacy telegram config: %v", err)
+	}
+	tg, err := cfg.Telegram()
+	if err != nil {
+		t.Fatalf("Telegram() = %v", err)
+	}
+	if tg.Provider != "telegram" || tg.Token != "abc" || tg.ChannelID != "123" {
+		t.Fatalf("LoadConfig() telegram legacy = %+v, want token/channel preserved", tg)
 	}
 
 	SaveConfig(Config{
@@ -44,19 +77,45 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 			},
 		},
 	})
-	cfg, err := LoadConfig()
+	cfg, err = LoadConfig()
 	if err != nil {
 		t.Fatalf("LoadConfig() round trip: %v", err)
 	}
-	tg, err := cfg.Telegram()
+	tg, err = cfg.Telegram()
 	if err != nil {
 		t.Fatalf("Telegram() = %v", err)
 	}
 	if tg.Token != "abc" || tg.ChannelID != "123" {
 		t.Fatalf("LoadConfig() telegram = %+v, want token/channel preserved", tg)
 	}
-	if cfg.Workspaces == nil {
-		t.Fatal("expected workspaces map to be initialized")
+}
+
+func TestSlackValidation(t *testing.T) {
+	cfg := Config{
+		Channels: map[string]ChannelConfig{
+			"slack": {},
+		},
+	}
+
+	if _, err := cfg.Slack(); err == nil || err.Error() != "config missing slack token" {
+		t.Fatalf("Slack() missing token err = %v", err)
+	}
+
+	cfg.Channels["slack"] = ChannelConfig{Token: "xoxb-123"}
+	if _, err := cfg.Slack(); err == nil || err.Error() != "config missing slack app_token" {
+		t.Fatalf("Slack() missing app_token err = %v", err)
+	}
+
+	slack, err := (Config{
+		Channels: map[string]ChannelConfig{
+			"slack": {Token: "xoxb-123", AppToken: "xapp-123"},
+		},
+	}).Slack()
+	if err != nil {
+		t.Fatalf("Slack() valid config: %v", err)
+	}
+	if slack.Provider != "slack" || slack.Token != "xoxb-123" || slack.AppToken != "xapp-123" {
+		t.Fatalf("Slack() = %+v, want provider/token/app_token preserved", slack)
 	}
 }
 
