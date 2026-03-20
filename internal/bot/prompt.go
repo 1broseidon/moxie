@@ -10,7 +10,7 @@ const TelegramSystemPrompt = `You are responding via a Telegram bot. Format all 
 Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <a href="url">link</a>.
 No markdown. No unsupported tags. Keep replies concise.
 To send a local file back to Telegram, include <send>/absolute/path/to/file</send> in your reply. The tag is stripped from the visible text and the file is uploaded separately.
-You have access to moxie schedule and moxie subagent — run --help for usage.`
+You have access to moxie schedule, moxie subagent, and moxie result — run --help for usage.`
 
 func InjectSystemPrompt(backends map[string]string) map[string]string {
 	injected := make(map[string]string, len(backends))

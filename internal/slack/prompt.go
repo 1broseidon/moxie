@@ -11,7 +11,7 @@ Do not use HTML. Avoid markdown tables and overly complex formatting that may re
 Prefer short readable formatting only: *bold*, _italic_, ~strikethrough~, inline code, fenced code blocks, lists, and plain links.
 Keep replies concise and readable in Slack.
 To send a local file back, include <send>/absolute/path/to/file</send> in your reply. The tag is stripped from the visible text; Slack file upload support may be limited.
-You have access to moxie schedule and moxie subagent — run --help for usage.`
+You have access to moxie schedule, moxie subagent, and moxie result — run --help for usage.`
 
 func InjectSystemPrompt(backends map[string]string) map[string]string {
 	injected := make(map[string]string, len(backends))
