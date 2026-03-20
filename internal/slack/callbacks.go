@@ -14,15 +14,22 @@ func slackDispatchCallbacks(api messenger, job *store.PendingJob) dispatch.Callb
 	stopInitial := func() {}
 	if job.Status != "ready" && job.Status != "delivered" {
 		done := make(chan struct{})
+		stopped := make(chan struct{})
 		go func() {
+			defer close(stopped)
+			timer := time.NewTimer(1200 * time.Millisecond)
+			defer timer.Stop()
 			select {
-			case <-time.After(1200 * time.Millisecond):
+			case <-timer.C:
 				status.show("")
 			case <-done:
 			}
 		}()
 		stopInitial = func() {
-			once.Do(func() { close(done) })
+			once.Do(func() {
+				close(done)
+				<-stopped
+			})
 		}
 	}
 	return dispatch.Callbacks{

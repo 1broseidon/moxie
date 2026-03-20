@@ -79,6 +79,32 @@ func TestClearNativeSessionNoopWithoutSavedSession(t *testing.T) {
 	}
 }
 
+func TestClearNativeSessionUsesDefaultFilesystemStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	client := &oneagent.Client{}
+	thread := &oneagent.Thread{
+		ID:             "thread-default-store",
+		NativeSessions: map[string]string{"pi": "stale-session"},
+	}
+	if err := (oneagent.FilesystemStore{}).SaveThread(thread); err != nil {
+		t.Fatalf("save thread: %v", err)
+	}
+
+	if !dispatch.ClearNativeSession(client, store.State{Backend: "pi", ThreadID: thread.ID}) {
+		t.Fatal("expected native session to be cleared from default store")
+	}
+
+	got, err := (oneagent.FilesystemStore{}).LoadThread(thread.ID)
+	if err != nil {
+		t.Fatalf("load thread: %v", err)
+	}
+	if _, ok := got.NativeSessions["pi"]; ok {
+		t.Fatal("expected pi session to be removed")
+	}
+}
+
 func TestIsMissingNativeSessionError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -205,6 +231,54 @@ func TestProcessJobInterruptedLeavesRunningJob(t *testing.T) {
 	}
 }
 
+func TestProcessJobAllowsParallelDifferentConversations(t *testing.T) {
+	useTempStoreDir(t)
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	restoreRun := dispatch.SetRunModelFuncForTest(func(job *store.PendingJob, _ *oneagent.Client, _ func(string)) (string, bool) {
+		started <- job.ConversationID
+		<-release
+		return "done", false
+	})
+	t.Cleanup(restoreRun)
+
+	done := make(chan struct{}, 2)
+	runJob := func(id, conversationID string) {
+		dispatch.ProcessJob(&store.PendingJob{
+			ID:             id,
+			ConversationID: conversationID,
+		}, nil, nil, dispatch.Callbacks{
+			OnResult: func(result string) error { return nil },
+			OnDone: func() {
+				done <- struct{}{}
+			},
+		})
+	}
+
+	go runJob("job-a", "telegram:1")
+	go runJob("job-b", "slack:C1")
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case conversationID := <-started:
+			seen[conversationID] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("expected both jobs to enter runModelFunc, saw %v", seen)
+		}
+	}
+
+	close(release)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for parallel jobs to finish")
+		}
+	}
+}
+
 func TestRecoverPendingJobsDiscardsRunningJobWithMissingTemp(t *testing.T) {
 	useTempStoreDir(t)
 
@@ -286,6 +360,87 @@ func TestRetryDeliverableJobsProcessesReadyAndDeliveredOnly(t *testing.T) {
 	}
 	if !store.JobExists("job-203") {
 		t.Fatal("expected running job to remain")
+	}
+}
+
+func TestRetryDeliverableJobsSkipsStaleReadySnapshotAfterLiveDelivery(t *testing.T) {
+	useTempStoreDir(t)
+
+	restoreRun := dispatch.SetRunModelFuncForTest(func(job *store.PendingJob, _ *oneagent.Client, _ func(string)) (string, bool) {
+		return "done", false
+	})
+	t.Cleanup(restoreRun)
+
+	readyPersisted := make(chan struct{})
+	releaseOriginal := make(chan struct{})
+	originalDone := make(chan struct{})
+	deliveries := make(chan string, 2)
+
+	job := &store.PendingJob{ID: "job-stale", ConversationID: "telegram:1"}
+	go dispatch.ProcessJob(job, nil, nil, dispatch.Callbacks{
+		OnStatusClear: func() {
+			select {
+			case <-readyPersisted:
+			default:
+				close(readyPersisted)
+			}
+		},
+		OnResult: func(result string) error {
+			deliveries <- "original"
+			<-releaseOriginal
+			return nil
+		},
+		OnDone: func() {
+			close(originalDone)
+		},
+	})
+
+	select {
+	case <-readyPersisted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for live job to persist ready state")
+	}
+
+	retryDone := make(chan bool, 1)
+	go func() {
+		retryDone <- dispatch.RetryDeliverableJobs(nil, nil, func(job *store.PendingJob) dispatch.Callbacks {
+			return dispatch.Callbacks{
+				OnResult: func(result string) error {
+					deliveries <- "retry"
+					return nil
+				},
+			}
+		})
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	close(releaseOriginal)
+
+	select {
+	case <-originalDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for original job to complete")
+	}
+
+	select {
+	case retried := <-retryDone:
+		if retried {
+			t.Fatal("expected retry loop to skip stale ready snapshot after live delivery")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for retry loop to finish")
+	}
+
+	close(deliveries)
+	var got []string
+	for delivery := range deliveries {
+		got = append(got, delivery)
+	}
+	if !reflect.DeepEqual(got, []string{"original"}) {
+		t.Fatalf("deliveries = %v, want [original]", got)
+	}
+	if store.JobExists(job.ID) {
+		t.Fatalf("expected job %s to be removed after original delivery", job.ID)
 	}
 }
 

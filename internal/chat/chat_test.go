@@ -67,3 +67,96 @@ func TestHandleInboundBuildsImmediateCommandReply(t *testing.T) {
 		t.Fatal("expected no job for command")
 	}
 }
+
+func TestHandleInboundCommandsAreScopedPerConversation(t *testing.T) {
+	useTempConfigDir(t)
+
+	client := &oneagent.Client{
+		Backends: map[string]oneagent.Backend{
+			"claude": {DefaultModel: "sonnet"},
+			"pi":     {DefaultModel: "small"},
+		},
+	}
+	settings := Settings{Workspaces: map[string]string{}}
+	tgConversation := ConversationRef{Provider: ProviderTelegram, ChannelID: "412407481"}
+	slackConversation := ConversationRef{Provider: ProviderSlack, ChannelID: "C123", ThreadID: "1710000000.100"}
+
+	got := HandleInbound(
+		InboundMessage{
+			Source:       "telegram",
+			Conversation: tgConversation,
+			Text:         "/model pi",
+		},
+		settings,
+		"",
+		store.State{Backend: "claude", ThreadID: "chat"},
+		client,
+	)
+	if got.ImmediateReply != "Switched to pi" {
+		t.Fatalf("ImmediateReply = %q, want switched backend reply", got.ImmediateReply)
+	}
+
+	tgState := store.ReadConversationState(tgConversation.ID())
+	if tgState.Backend != "pi" {
+		t.Fatalf("telegram state backend = %q, want pi", tgState.Backend)
+	}
+
+	slackState := store.ReadConversationState(slackConversation.ID())
+	if slackState.Backend != "claude" || slackState.ThreadID != "chat" {
+		t.Fatalf("slack state = %+v, want untouched defaults", slackState)
+	}
+}
+
+func TestHandleInboundCWDChangeClearsNativeSession(t *testing.T) {
+	useTempConfigDir(t)
+
+	threadDir := t.TempDir()
+	workspaceDir := t.TempDir()
+	client := &oneagent.Client{
+		Backends: map[string]oneagent.Backend{
+			"codex": {},
+		},
+		Store: oneagent.FilesystemStore{Dir: threadDir},
+	}
+	if err := client.SaveThread(&oneagent.Thread{
+		ID:             "chat-1",
+		NativeSessions: map[string]string{"codex": "sess-1"},
+	}); err != nil {
+		t.Fatalf("SaveThread(): %v", err)
+	}
+
+	conversation := ConversationRef{Provider: ProviderTelegram, ChannelID: "412407481"}
+	store.WriteConversationState(conversation.ID(), store.State{
+		Backend:  "codex",
+		ThreadID: "chat-1",
+		CWD:      "/tmp/old",
+	})
+
+	got := HandleInbound(
+		InboundMessage{
+			Source:       "telegram",
+			Conversation: conversation,
+			Text:         "/cwd tele",
+		},
+		Settings{Workspaces: map[string]string{"tele": workspaceDir}},
+		"",
+		store.ReadConversationState(conversation.ID()),
+		client,
+	)
+	if !strings.Contains(got.ImmediateReply, workspaceDir) {
+		t.Fatalf("ImmediateReply = %q, want workspace path", got.ImmediateReply)
+	}
+
+	thread, err := client.LoadThread("chat-1")
+	if err != nil {
+		t.Fatalf("LoadThread(): %v", err)
+	}
+	if _, ok := thread.NativeSessions["codex"]; ok {
+		t.Fatalf("native session = %+v, want codex session removed", thread.NativeSessions)
+	}
+
+	state := store.ReadConversationState(conversation.ID())
+	if state.CWD != workspaceDir {
+		t.Fatalf("conversation cwd = %q, want %q", state.CWD, workspaceDir)
+	}
+}

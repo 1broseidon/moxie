@@ -97,6 +97,33 @@ func TestDeliverJobResultUsesStoredReplyThreadAndStripsSendTags(t *testing.T) {
 	}
 }
 
+func TestDeliverJobResultUsesInlineReplyConversation(t *testing.T) {
+	useSlackStoreDir(t)
+
+	var form url.Values
+	client := newSlackTestClient(t, func(rw http.ResponseWriter, req *http.Request) {
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("ParseForm(): %v", err)
+		}
+		form = req.PostForm
+		slackOKResponse(t, rw, map[string]any{"channel": "C123", "ts": "1710.8"})
+	})
+
+	job := &store.PendingJob{
+		ID:                "job-inline",
+		ConversationID:    "slack:C123",
+		ReplyConversation: "slack:C123:1700.8",
+		Result:            "done",
+	}
+
+	if err := DeliverJobResult(client, job); err != nil {
+		t.Fatalf("DeliverJobResult(): %v", err)
+	}
+	if got := form.Get("thread_ts"); got != "1700.8" {
+		t.Fatalf("thread_ts = %q, want 1700.8", got)
+	}
+}
+
 func TestRunningStatusShowUpdateClear(t *testing.T) {
 	useSlackStoreDir(t)
 
@@ -131,8 +158,8 @@ func TestRunningStatusShowUpdateClear(t *testing.T) {
 	status.clear()
 
 	want := []string{
-		"/chat.postMessage:Reading files...\ninternal/slack/slack.go",
-		"/chat.update:Writing files...\ninternal/slack/slack.go",
+		"/chat.postMessage:Reading files...\nread internal/slack/slack.go",
+		"/chat.update:Writing files...\nwrite internal/slack/slack.go",
 		"/chat.delete:",
 	}
 	if !reflect.DeepEqual(calls, want) {

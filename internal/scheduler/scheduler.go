@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -28,39 +29,42 @@ const (
 )
 
 type Schedule struct {
-	ID           string    `json:"id"`
-	Trigger      Trigger   `json:"trigger"`
-	Action       Action    `json:"action"`
-	At           time.Time `json:"at,omitempty"`
-	Cron         string    `json:"cron,omitempty"`
-	Text         string    `json:"text"`
-	Backend      string    `json:"backend,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	ThreadID     string    `json:"thread_id,omitempty"`
-	CWD          string    `json:"cwd,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	NextRun      time.Time `json:"next_run"`
-	LastRun      time.Time `json:"last_run,omitempty"`
-	RunningJobID string    `json:"running_job_id,omitempty"`
+	ID             string    `json:"id"`
+	Trigger        Trigger   `json:"trigger"`
+	Action         Action    `json:"action"`
+	At             time.Time `json:"at,omitempty"`
+	Cron           string    `json:"cron,omitempty"`
+	Text           string    `json:"text"`
+	ConversationID string    `json:"conversation_id,omitempty"`
+	Backend        string    `json:"backend,omitempty"`
+	Model          string    `json:"model,omitempty"`
+	ThreadID       string    `json:"thread_id,omitempty"`
+	CWD            string    `json:"cwd,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	NextRun        time.Time `json:"next_run"`
+	LastRun        time.Time `json:"last_run,omitempty"`
+	RunningJobID   string    `json:"running_job_id,omitempty"`
 }
 
 type AddInput struct {
-	Trigger  Trigger
-	Action   Action
-	At       string
-	In       string
-	Cron     string
-	Text     string
-	Backend  string
-	Model    string
-	ThreadID string
-	CWD      string
-	Now      time.Time
+	Trigger        Trigger
+	Action         Action
+	At             string
+	In             string
+	Cron           string
+	Text           string
+	ConversationID string
+	Backend        string
+	Model          string
+	ThreadID       string
+	CWD            string
+	Now            time.Time
 }
 
 type Store struct {
 	path string
 	loc  *time.Location
+	mu   sync.Mutex
 }
 
 type fileData struct {
@@ -75,6 +79,9 @@ func NewStore(path string, loc *time.Location) *Store {
 }
 
 func (s *Store) Add(input AddInput) (Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return Schedule{}, err
@@ -99,6 +106,9 @@ func (s *Store) Add(input AddInput) (Schedule, error) {
 }
 
 func (s *Store) List() ([]Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return nil, err
@@ -108,6 +118,9 @@ func (s *Store) List() ([]Schedule, error) {
 }
 
 func (s *Store) Get(id string) (Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return Schedule{}, err
@@ -121,6 +134,9 @@ func (s *Store) Get(id string) (Schedule, error) {
 }
 
 func (s *Store) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return err
@@ -144,6 +160,9 @@ func (s *Store) Delete(id string) error {
 }
 
 func (s *Store) Due(now time.Time) ([]Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return nil, err
@@ -166,6 +185,9 @@ func (s *Store) Due(now time.Time) ([]Schedule, error) {
 }
 
 func (s *Store) AttachJob(id, jobID string) (Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if strings.TrimSpace(jobID) == "" {
 		return Schedule{}, fmt.Errorf("job id cannot be empty")
 	}
@@ -192,6 +214,9 @@ func (s *Store) AttachJob(id, jobID string) (Schedule, error) {
 }
 
 func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return Schedule{}, err
@@ -231,6 +256,9 @@ func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, erro
 }
 
 func (s *Store) Repair(jobExists func(string) bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	schedules, err := s.load()
 	if err != nil {
 		return err
@@ -271,15 +299,16 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 	}
 
 	sc := Schedule{
-		ID:        newID(now),
-		Trigger:   trigger,
-		Action:    action,
-		Text:      text,
-		Backend:   strings.TrimSpace(input.Backend),
-		Model:     strings.TrimSpace(input.Model),
-		ThreadID:  strings.TrimSpace(input.ThreadID),
-		CWD:       strings.TrimSpace(input.CWD),
-		CreatedAt: now,
+		ID:             newID(now),
+		Trigger:        trigger,
+		Action:         action,
+		Text:           text,
+		ConversationID: strings.TrimSpace(input.ConversationID),
+		Backend:        strings.TrimSpace(input.Backend),
+		Model:          strings.TrimSpace(input.Model),
+		ThreadID:       strings.TrimSpace(input.ThreadID),
+		CWD:            strings.TrimSpace(input.CWD),
+		CreatedAt:      now,
 	}
 
 	switch trigger {

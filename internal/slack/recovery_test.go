@@ -22,6 +22,8 @@ func TestIsSlackJob(t *testing.T) {
 	}{
 		{job: store.PendingJob{ConversationID: "slack:C1"}, want: true},
 		{job: store.PendingJob{Source: string(chat.ProviderSlack)}, want: true},
+		{job: store.PendingJob{Source: "subagent", ConversationID: "slack:C1"}, want: false},
+		{job: store.PendingJob{Source: "subagent-synthesis", ConversationID: "slack:C1"}, want: true},
 		{job: store.PendingJob{ConversationID: "telegram:1"}, want: false},
 	}
 
@@ -36,6 +38,7 @@ func TestRecoverPendingJobsProcessesOnlySlackJobs(t *testing.T) {
 	useRecoveryStoreDir(t)
 
 	store.WriteJob(store.PendingJob{ID: "job-slack", Status: "ready", ConversationID: "slack:C1", Result: "hello"})
+	store.WriteJob(store.PendingJob{ID: "job-synth", Source: "subagent-synthesis", Status: "ready", ConversationID: "slack:C1", Result: "synth"})
 	store.WriteJob(store.PendingJob{ID: "job-tg", Status: "ready", ConversationID: "telegram:1", Result: "ignore"})
 
 	var seen []string
@@ -50,11 +53,14 @@ func TestRecoverPendingJobsProcessesOnlySlackJobs(t *testing.T) {
 	if !RecoverPendingJobs(client, nil, nil) {
 		t.Fatal("expected slack recovery to report work")
 	}
-	if !reflect.DeepEqual(seen, []string{"hello"}) {
-		t.Fatalf("seen = %v, want [hello]", seen)
+	if !reflect.DeepEqual(seen, []string{"hello", "synth"}) {
+		t.Fatalf("seen = %v, want [hello synth]", seen)
 	}
 	if store.JobExists("job-slack") {
 		t.Fatal("expected slack job to be removed")
+	}
+	if store.JobExists("job-synth") {
+		t.Fatal("expected synthesis job to be removed")
 	}
 	if !store.JobExists("job-tg") {
 		t.Fatal("expected telegram job to remain")
@@ -65,6 +71,7 @@ func TestRetryDeliverableJobsProcessesOnlySlackJobs(t *testing.T) {
 	useRecoveryStoreDir(t)
 
 	store.WriteJob(store.PendingJob{ID: "job-slack", Status: "ready", ConversationID: "slack:C1", Result: "hello"})
+	store.WriteJob(store.PendingJob{ID: "job-synth", Source: "subagent-synthesis", Status: "ready", ConversationID: "slack:C1", Result: "synth"})
 	store.WriteJob(store.PendingJob{ID: "job-tg", Status: "ready", ConversationID: "telegram:1", Result: "ignore"})
 
 	var seen []string
@@ -79,8 +86,8 @@ func TestRetryDeliverableJobsProcessesOnlySlackJobs(t *testing.T) {
 	if !RetryDeliverableJobs(client, nil, nil) {
 		t.Fatal("expected slack retry to report work")
 	}
-	if !reflect.DeepEqual(seen, []string{"hello"}) {
-		t.Fatalf("seen = %v, want [hello]", seen)
+	if !reflect.DeepEqual(seen, []string{"hello", "synth"}) {
+		t.Fatalf("seen = %v, want [hello synth]", seen)
 	}
 	if !store.JobExists("job-tg") {
 		t.Fatal("expected telegram job to remain")

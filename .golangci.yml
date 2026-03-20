@@ -1,0 +1,15 @@
+version: "2"
+
+linters:
+  enable:
+    - unused
+    - ineffassign
+    - govet
+    - staticcheck
+    - errcheck
+
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1000"

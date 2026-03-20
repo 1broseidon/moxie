@@ -51,6 +51,8 @@ func main() {
 		cmdCursor()
 	case "schedule":
 		cmdSchedule()
+	case "subagent":
+		cmdSubagent()
 	case "threads":
 		cmdThreads()
 	case "serve":
@@ -77,8 +79,9 @@ Usage:
   moxie cursor set <update_id>            Manually set cursor
   moxie cursor reset                      Reset cursor to 0
   moxie schedule <subcommand>             Manage schedules
+  moxie subagent --backend <name> --text <task>  Delegate work to a background agent
   moxie threads show <id>                 Show turns for a thread
-  moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run a chat transport and dispatch to agent backends`)
+  moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run configured chat transports and dispatch to agent backends`)
 }
 
 func cmdInit() {
@@ -91,9 +94,13 @@ func cmdInit() {
 	var chatID int64
 
 	fmt.Print("Bot token: ")
-	fmt.Scanln(&token)
+	if _, err := fmt.Scanln(&token); err != nil {
+		fatal("failed to read bot token: %v", err)
+	}
 	fmt.Print("Chat ID: ")
-	fmt.Scanln(&chatID)
+	if _, err := fmt.Scanln(&chatID); err != nil {
+		fatal("failed to read chat ID: %v", err)
+	}
 
 	if token == "" {
 		fatal("token cannot be empty")
@@ -217,7 +224,9 @@ func cmdCursor() {
 			fmt.Printf("cursor set to %d\n", n)
 			return
 		case "reset":
-			os.Remove(store.ConfigFile("telegram-cursor"))
+			if err := os.Remove(store.ConfigFile("telegram-cursor")); err != nil && !os.IsNotExist(err) {
+				fatal("failed to reset cursor: %v", err)
+			}
 			fmt.Println("cursor reset")
 			return
 		}
@@ -292,20 +301,69 @@ func cmdSchedule() {
 }
 
 func scheduleUsage() {
-	fmt.Println(`moxie schedule
+	fmt.Println(`moxie schedule — create and manage scheduled messages and tasks
 
 Usage:
-  moxie schedule add --action send --in 5m --text "Call John"
-  moxie schedule add --action send --at 2026-03-18T10:00:00-05:00 --text "Call John"
-  moxie schedule add --action dispatch --cron "0 1 * * *" --text "Run a security scan"
+  moxie schedule add [flags]
   moxie schedule list
   moxie schedule show <id>
   moxie schedule rm <id>
 
+Flags for add:
+  --transport <telegram|slack>                Use the configured default conversation for one transport
+  --conversation <provider:channel[:thread]>  Target a specific provider conversation directly
+  --action <send|dispatch>                    Send a fixed message or dispatch agent work
+  --text <text>                               Message text or dispatch task
+  --in <duration>                             Relative one-shot schedule like 5m, 2h, or 1d2h30m
+  --at <RFC3339 time>                         Exact one-shot timestamp with offset
+  --cron <spec>                               Recurring cron schedule
+  --backend <name>                            Override captured backend for dispatch schedules
+  --model <name>                              Override captured model for dispatch schedules
+  --thread <id>                               Override captured thread for dispatch schedules
+  --cwd <dir>                                 Override captured working directory for dispatch schedules
+
 Notes:
-  --action is required: send or dispatch
   Use exactly one of --in, --at, or --cron
-  Dispatch schedules capture backend/model/thread/cwd at creation time unless overridden`)
+  Use --conversation to target a specific provider conversation, or --transport to target the configured default conversation for one transport
+  Dispatch schedules capture backend/model/thread/cwd at creation time
+
+When to use:
+  Only when explicitly asked to create, inspect, modify, or delete schedules
+  Prefer --in for relative times, --at for exact timestamps, and --cron for recurring schedules
+  Use action send for fixed messages and action dispatch for agent work
+
+Examples:
+  moxie schedule add --transport telegram --action send --in 5m --text "Call John"
+  moxie schedule add --conversation slack:C123:1710000000.100 --action send --at 2026-03-18T10:00:00-05:00 --text "Call John"
+  moxie schedule add --transport slack --action dispatch --cron "0 1 * * *" --text "Run a security scan"
+  moxie schedule list
+  moxie schedule rm sch_123`)
+}
+
+func subagentUsage() {
+	fmt.Println(`moxie subagent — delegate a task to a background agent
+
+Usage:
+  moxie subagent --backend <name> --text <task>
+
+Flags:
+  --backend <name>            Required backend to run the delegated task
+  --text <task>               Required self-contained task description
+  --context-budget <n>        Context budget for compiled parent context (default 8192)
+  --cwd <dir>                 Override working directory for the subagent
+  --model <name>              Optional model override for the subagent backend
+  --parent-job <id>           Explicit parent dispatch job to attach to
+
+When to use:
+  Only when delegating a distinct self-contained task to another backend
+  Do not use it for simple questions or work you can handle directly
+  The subagent runs asynchronously with context from the parent conversation
+  Results are delivered back when complete
+  You can continue working while the subagent runs
+
+Examples:
+  moxie subagent --backend codex --text "Audit the scheduler retry logic"
+  moxie subagent --backend gemini --context-budget 16384 --text "Summarize the Slack delivery edge cases"`)
 }
 
 func mustScheduleTrigger(in, at, cronSpec string) scheduler.Trigger {
@@ -360,6 +418,41 @@ func applyScheduleActionDefaults(input *scheduler.AddInput) {
 	input.CWD = ""
 }
 
+func defaultConversationForTransport(cfg store.Config, transport string) (chat.ConversationRef, error) {
+	switch strings.TrimSpace(transport) {
+	case "telegram":
+		if _, err := cfg.Telegram(); err != nil {
+			return chat.ConversationRef{}, err
+		}
+		return botpkg.ConfigConversation(cfg), nil
+	case "slack":
+		conversation := slackDefaultConversation(cfg)
+		if conversation.ChannelID == "" {
+			return chat.ConversationRef{}, fmt.Errorf("slack schedule target requires channels.slack.channel_id")
+		}
+		return conversation, nil
+	default:
+		return chat.ConversationRef{}, fmt.Errorf("unsupported transport: %s", transport)
+	}
+}
+
+func resolveScheduleConversation(cfg store.Config, requestedTransport, rawConversation string) (chat.ConversationRef, error) {
+	rawConversation = strings.TrimSpace(rawConversation)
+	if rawConversation != "" {
+		conversation := chat.ParseConversationID(rawConversation)
+		if conversation.Provider == "" || strings.TrimSpace(conversation.ChannelID) == "" {
+			return chat.ConversationRef{}, fmt.Errorf("invalid conversation id: %s", rawConversation)
+		}
+		return conversation, nil
+	}
+
+	transport, err := chooseServeTransport(cfg, requestedTransport)
+	if err != nil {
+		return chat.ConversationRef{}, err
+	}
+	return defaultConversationForTransport(cfg, transport)
+}
+
 func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	fs := flag.NewFlagSet("schedule add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -373,26 +466,38 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	backendFlag := fs.String("backend", "", "")
 	modelFlag := fs.String("model", "", "")
 	threadFlag := fs.String("thread", "", "")
+	transportFlag := fs.String("transport", "", "")
+	conversationFlag := fs.String("conversation", "", "")
 
 	if err := fs.Parse(args); err != nil {
-		fatal("usage: moxie schedule add --action <send|dispatch> (--in <duration>|--at <time>|--cron <spec>) --text <text>")
+		fatal("usage: moxie schedule add (--transport <telegram|slack>|--conversation <provider:channel[:thread]>) --action <send|dispatch> (--in <duration>|--at <time>|--cron <spec>) --text <text>")
 	}
 	if fs.NArg() > 0 {
 		fatal("unexpected schedule add args: %s", strings.Join(fs.Args(), " "))
 	}
 
-	state := store.ReadState()
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		fatal("%v", err)
+	}
+	conversation, err := resolveScheduleConversation(cfg, *transportFlag, *conversationFlag)
+	if err != nil {
+		fatal("schedule add requires an explicit target conversation: %v", err)
+	}
+
+	state := store.ReadConversationState(conversation.ID())
 	input := scheduler.AddInput{
-		Trigger:  mustScheduleTrigger(*in, *at, *cronSpec),
-		Action:   scheduler.Action(strings.TrimSpace(*action)),
-		In:       *in,
-		At:       *at,
-		Cron:     *cronSpec,
-		Text:     *text,
-		Backend:  state.Backend,
-		Model:    state.Model,
-		ThreadID: state.ThreadID,
-		CWD:      state.CWD,
+		Trigger:        mustScheduleTrigger(*in, *at, *cronSpec),
+		Action:         scheduler.Action(strings.TrimSpace(*action)),
+		In:             *in,
+		At:             *at,
+		Cron:           *cronSpec,
+		Text:           *text,
+		ConversationID: conversation.ID(),
+		Backend:        state.Backend,
+		Model:          state.Model,
+		ThreadID:       state.ThreadID,
+		CWD:            state.CWD,
 	}
 	applyScheduleAddOverrides(&input, *backendFlag, *modelFlag, *threadFlag, *cwdFlag)
 	applyScheduleActionDefaults(&input)
@@ -476,6 +581,9 @@ func renderSchedule(sc scheduler.Schedule) string {
 		fmt.Fprintf(&buf, "Running job: %s\n", sc.RunningJobID)
 	}
 	if sc.Action == scheduler.ActionDispatch {
+		if sc.ConversationID != "" {
+			fmt.Fprintf(&buf, "Conversation: %s\n", sc.ConversationID)
+		}
 		fmt.Fprintf(&buf, "Backend: %s\n", sc.Backend)
 		if sc.Model != "" {
 			fmt.Fprintf(&buf, "Model: %s\n", sc.Model)
@@ -484,6 +592,8 @@ func renderSchedule(sc scheduler.Schedule) string {
 		if sc.CWD != "" {
 			fmt.Fprintf(&buf, "CWD: %s\n", sc.CWD)
 		}
+	} else if sc.ConversationID != "" {
+		fmt.Fprintf(&buf, "Conversation: %s\n", sc.ConversationID)
 	}
 	fmt.Fprintf(&buf, "Text: %s\n", sc.Text)
 	return strings.TrimSpace(buf.String())
@@ -496,11 +606,154 @@ func formatScheduleTime(t time.Time) string {
 	return t.In(time.Local).Format("2006-01-02 15:04 MST")
 }
 
-// --- Serve loop ---
+// --- Subagent ---
 
-func parseServeFlags() string {
-	return parseServeTransportAndCWD().cwd
+type subagentArgs struct {
+	backend   string
+	text      string
+	budget    int
+	cwd       string
+	model     string
+	parentJob string
 }
+
+func parseSubagentArgs() *subagentArgs {
+	fs := flag.NewFlagSet("subagent", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	if len(os.Args) > 2 {
+		arg := os.Args[2]
+		if arg == "help" || arg == "--help" || arg == "-h" {
+			subagentUsage()
+			os.Exit(0)
+		}
+	}
+
+	args := &subagentArgs{}
+	fs.StringVar(&args.backend, "backend", "", "")
+	fs.StringVar(&args.text, "text", "", "")
+	fs.IntVar(&args.budget, "context-budget", 8192, "")
+	fs.StringVar(&args.cwd, "cwd", "", "")
+	fs.StringVar(&args.model, "model", "", "")
+	fs.StringVar(&args.parentJob, "parent-job", "", "")
+
+	if err := fs.Parse(os.Args[2:]); err != nil || args.backend == "" || args.text == "" {
+		subagentUsage()
+		os.Exit(1)
+	}
+	return args
+}
+
+func findParentJob(parentID string) *store.PendingJob {
+	jobs := store.ListJobs()
+	if parentID != "" {
+		for _, j := range jobs {
+			j := j
+			if j.ID == parentID {
+				return &j
+			}
+		}
+		fatal("parent job not found: %s", parentID)
+	}
+	var parent *store.PendingJob
+	for _, j := range jobs {
+		j := j
+		if j.Status == "running" && j.Source != "subagent" {
+			if parent != nil {
+				fatal("multiple active dispatches — use --parent-job <id> to disambiguate")
+			}
+			parent = &j
+		}
+	}
+	if parent == nil {
+		fatal("no active dispatch found — moxie subagent can only be called from within a running dispatch")
+	}
+	return parent
+}
+
+func buildSubagentPrompt(text string, parent *store.PendingJob, budget int) string {
+	if parent.State.ThreadID == "" {
+		return text
+	}
+	thread, err := oneagent.LoadThread(parent.State.ThreadID)
+	if err != nil || thread == nil || len(thread.Turns) == 0 {
+		return text
+	}
+	ctx, _ := thread.CompileContext(budget)
+	ctx = stripSubagentLines(ctx)
+	if ctx == "" {
+		return text
+	}
+	return "Context from parent conversation:\n" + ctx + "\n\nTask:\n" + text
+}
+
+func resolveReplyConversation(parent *store.PendingJob) string {
+	if parent.ReplyConversation != "" {
+		return parent.ReplyConversation
+	}
+	replyConversation := parent.ConversationID
+	if chat.ParseConversationID(parent.ConversationID).Provider == chat.ProviderSlack {
+		if ref := slackpkg.ReadReplyConversation(parent.ID); ref.Provider == chat.ProviderSlack && ref.ChannelID != "" {
+			replyConversation = ref.ID()
+		}
+	}
+	return replyConversation
+}
+
+func cmdSubagent() {
+	args := parseSubagentArgs()
+
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		fatal("load config: %v", err)
+	}
+	maxDepth := cfg.MaxSubagentDepth()
+
+	parent := findParentJob(args.parentJob)
+
+	depth := parent.Depth + 1
+	if depth > maxDepth {
+		fatal("subagent depth limit reached (%d/%d) — handle this task directly", depth, maxDepth)
+	}
+
+	delegationCtx := parent.Prompt
+	if len(delegationCtx) > 200 {
+		delegationCtx = delegationCtx[:200]
+	}
+
+	cwd := parent.CWD
+	if args.cwd != "" {
+		resolved, err := resolveDir(args.cwd)
+		if err != nil {
+			fatal("invalid --cwd: %v", err)
+		}
+		cwd = resolved
+	}
+
+	job := store.PendingJob{
+		ID:                store.NewJobID(),
+		ConversationID:    parent.ConversationID,
+		ReplyConversation: resolveReplyConversation(parent),
+		Source:            "subagent",
+		Prompt:            buildSubagentPrompt(args.text, parent, args.budget),
+		CWD:               cwd,
+		ParentJobID:       parent.ID,
+		DelegatedTask:     args.text,
+		DelegationContext: delegationCtx,
+		Depth:             depth,
+		SynthesisState:    parent.State,
+		State: store.State{
+			Backend:  args.backend,
+			Model:    args.model,
+			ThreadID: fmt.Sprintf("sub-%s-%d", parent.State.ThreadID, time.Now().UnixNano()),
+		},
+	}
+	store.WriteJob(job)
+
+	fmt.Printf("subagent dispatched: %s\nbackend: %s\ndepth: %d/%d\ntask: %s\n", job.ID, args.backend, depth, maxDepth, args.text)
+}
+
+// --- Serve loop ---
 
 type serveFlags struct {
 	cwd       string
@@ -592,13 +845,24 @@ func scheduleState(sc scheduler.Schedule) store.State {
 	return st
 }
 
-func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+func scheduledConversationID(sc scheduler.Schedule, fallbackConversationID string) string {
+	if trimmed := strings.TrimSpace(sc.ConversationID); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(fallbackConversationID)
+}
+
+func runDueSchedulesTelegram(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
 	due, err := schedules.Due(time.Now())
 	if err != nil {
 		log.Printf("schedule due check failed: %v", err)
 		return
 	}
 	for _, sc := range due {
+		conversationID := scheduledConversationID(sc, fallbackConversationID)
+		if chat.ParseConversationID(conversationID).Provider != chat.ProviderTelegram {
+			continue
+		}
 		job := botpkg.PendingJob{
 			ID:             store.NewJobID(),
 			ScheduleID:     sc.ID,
@@ -633,46 +897,48 @@ func runDueSchedules(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.
 	}
 }
 
-func startScheduleLoop(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
-	ticker := time.NewTicker(30 * time.Second)
+func startTickerLoop(ctx context.Context, interval time.Duration, fn func()) {
+	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
-		runDueSchedules(bot, client, schedules, conversationID)
+		fn()
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-ticker.C:
 				if dispatch.IsShuttingDown() {
 					return
 				}
-				runDueSchedules(bot, client, schedules, conversationID)
+				fn()
 			}
 		}
 	}()
 }
 
-func startDeliveryRetryLoop(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store) {
-	ticker := time.NewTicker(15 * time.Second)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if dispatch.IsShuttingDown() {
-					return
-				}
-				botpkg.RetryDeliverableJobs(bot, client, schedules)
-			}
-		}
-	}()
+func startScheduleLoopTelegram(ctx context.Context, bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+	startTickerLoop(ctx, 30*time.Second, func() {
+		runDueSchedulesTelegram(bot, client, schedules, conversationID)
+	})
 }
 
-func runDueSchedulesSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+func startDeliveryRetryLoopTelegram(ctx context.Context, bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store) {
+	startTickerLoop(ctx, 15*time.Second, func() {
+		botpkg.RetryDeliverableJobs(bot, client, schedules)
+	})
+}
+
+func runDueSchedulesSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
 	due, err := schedules.Due(time.Now())
 	if err != nil {
 		log.Printf("schedule due check failed: %v", err)
 		return
 	}
 	for _, sc := range due {
+		conversationID := scheduledConversationID(sc, fallbackConversationID)
+		if chat.ParseConversationID(conversationID).Provider != chat.ProviderSlack {
+			continue
+		}
 		job := store.PendingJob{
 			ID:             store.NewJobID(),
 			ScheduleID:     sc.ID,
@@ -707,37 +973,181 @@ func runDueSchedulesSlack(api slackpkg.Messenger, client *oneagent.Client, sched
 	}
 }
 
-func startScheduleLoopSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
-	ticker := time.NewTicker(30 * time.Second)
-	go func() {
-		defer ticker.Stop()
+func startScheduleLoopSlack(ctx context.Context, api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+	startTickerLoop(ctx, 30*time.Second, func() {
 		runDueSchedulesSlack(api, client, schedules, conversationID)
-		for {
-			select {
-			case <-ticker.C:
-				if dispatch.IsShuttingDown() {
-					return
-				}
-				runDueSchedulesSlack(api, client, schedules, conversationID)
-			}
-		}
-	}()
+	})
 }
 
-func startDeliveryRetryLoopSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store) {
-	ticker := time.NewTicker(15 * time.Second)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if dispatch.IsShuttingDown() {
-					return
-				}
-				slackpkg.RetryDeliverableJobs(api, client, schedules)
-			}
+func startDeliveryRetryLoopSlack(ctx context.Context, api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store) {
+	startTickerLoop(ctx, 15*time.Second, func() {
+		slackpkg.RetryDeliverableJobs(api, client, schedules)
+	})
+}
+
+// --- Subagent job watcher ---
+
+// stripSubagentLines removes lines mentioning "moxie subagent" from text.
+func stripSubagentLines(s string) string {
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.Contains(line, "moxie subagent") {
+			continue
 		}
-	}()
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+type subagentTransports struct {
+	telegramBot    *tb.Bot
+	telegramClient *oneagent.Client
+	slackAPI       slackpkg.Messenger
+	slackClient    *oneagent.Client
+	schedules      *scheduler.Store
+	maxDepth       int
+}
+
+func startSubagentWatcher(ctx context.Context, cfg store.Config, backends map[string]oneagent.Backend, schedules *scheduler.Store) {
+	st := subagentTransports{
+		schedules: schedules,
+		maxDepth:  cfg.MaxSubagentDepth(),
+	}
+
+	if _, err := cfg.Telegram(); err == nil {
+		if bot, err := botpkg.NewBot(cfg); err == nil {
+			st.telegramBot = bot
+			st.telegramClient = newTelegramClient(backends)
+		}
+	}
+	if _, err := cfg.Slack(); err == nil {
+		if adapter, err := slackpkg.New(&cfg, "", nil, nil); err == nil {
+			st.slackAPI = adapter.API()
+			st.slackClient = newSlackClient(backends)
+		}
+	}
+
+	startTickerLoop(ctx, 3*time.Second, func() {
+		runSubagentJobs(st)
+	})
+}
+
+func runSubagentJobs(st subagentTransports) {
+	jobs := store.ListJobs()
+	for _, job := range jobs {
+		if job.Source != "subagent" || job.Status != "" {
+			continue
+		}
+		job := job
+		log.Printf("dispatching subagent job %s (backend=%s depth=%d/%d)", job.ID, job.State.Backend, job.Depth, st.maxDepth)
+
+		provider := chat.ParseConversationID(job.ConversationID).Provider
+		switch provider {
+		case chat.ProviderTelegram:
+			if st.telegramBot == nil || st.telegramClient == nil {
+				log.Printf("subagent job %s targets telegram but no telegram transport", job.ID)
+				continue
+			}
+			dispatch.ProcessJob(&job, st.telegramClient, st.schedules, subagentCallbacks(
+				job, st.telegramClient, st.schedules,
+				func(synthJob store.PendingJob) error {
+					return botpkg.DeliverJobResult(st.telegramBot, &synthJob)
+				},
+			))
+		case chat.ProviderSlack:
+			if st.slackAPI == nil || st.slackClient == nil {
+				log.Printf("subagent job %s targets slack but no slack transport", job.ID)
+				continue
+			}
+			dispatch.ProcessJob(&job, st.slackClient, st.schedules, subagentCallbacks(
+				job, st.slackClient, st.schedules,
+				func(synthJob store.PendingJob) error {
+					return slackpkg.DeliverJobResult(st.slackAPI, &synthJob)
+				},
+			))
+		default:
+			log.Printf("subagent job %s has unknown provider %s", job.ID, provider)
+		}
+
+		if dispatch.IsShuttingDown() {
+			return
+		}
+	}
+}
+
+func subagentCallbacks(job store.PendingJob, synthClient *oneagent.Client, schedules *scheduler.Store, deliver func(store.PendingJob) error) dispatch.Callbacks {
+	return dispatch.Callbacks{
+		OnActivity:    func(string) {},
+		OnStatusClear: func() {},
+		OnDone:        func() {},
+		OnResult: func(result string) error {
+			return dispatchSynthesis(job, result, synthClient, schedules, deliver)
+		},
+	}
+}
+
+// dispatchSynthesis creates a new dispatch on the parent conversation's thread
+// so the main agent can synthesize the subagent result with full context.
+func dispatchSynthesis(subJob store.PendingJob, result string, client *oneagent.Client, schedules *scheduler.Store, deliver func(store.PendingJob) error) error {
+	convState := subJob.SynthesisState
+	if convState == (store.State{}) {
+		convState = store.ReadConversationState(subJob.ConversationID)
+	}
+	prompt := buildSynthesisPrompt(subJob.DelegationContext, subJob.DelegatedTask, subJob.State.Backend, result)
+	replyConversation := subJob.ReplyConversation
+	if replyConversation == "" {
+		replyConversation = subJob.ConversationID
+	}
+
+	synthJob := store.PendingJob{
+		ID:                store.NewJobID(),
+		ConversationID:    subJob.ConversationID,
+		ReplyConversation: replyConversation,
+		Source:            "subagent-synthesis",
+		Prompt:            prompt,
+		CWD:               subJob.CWD,
+		Depth:             subJob.Depth,
+		Status:            "running",
+		State: store.State{
+			Backend:  convState.Backend,
+			Model:    convState.Model,
+			ThreadID: convState.ThreadID,
+		},
+	}
+	store.WriteJob(synthJob)
+	log.Printf("dispatching synthesis job %s for subagent %s on thread %s", synthJob.ID, subJob.ID, convState.ThreadID)
+
+	dispatch.ProcessJob(&synthJob, client, schedules, dispatch.Callbacks{
+		OnActivity:    func(string) {},
+		OnStatusClear: func() {},
+		OnDone:        func() {},
+		OnResult: func(synthResult string) error {
+			synthJob.Result = synthResult
+			return deliver(synthJob)
+		},
+	})
+	return nil
+}
+
+func buildSynthesisPrompt(delegationCtx, task, backend, result string) string {
+	if task == "" {
+		task = "(unspecified)"
+	}
+	var b strings.Builder
+	b.WriteString("A background agent you delegated to has completed.\n")
+	if delegationCtx != "" {
+		b.WriteString("Original context: ")
+		b.WriteString(delegationCtx)
+		b.WriteString("\n")
+	}
+	b.WriteString("Task: ")
+	b.WriteString(task)
+	b.WriteString("\nBackend: ")
+	b.WriteString(backend)
+	b.WriteString("\n\nResult:\n")
+	b.WriteString(result)
+	b.WriteString("\n\nSynthesize this result for the user. Reference what they were working on when you delegated this task.")
+	return b.String()
 }
 
 func chooseServeTransport(cfg store.Config, requested string) (string, error) {
@@ -780,6 +1190,95 @@ func chooseServeTransport(cfg store.Config, requested string) (string, error) {
 	}
 }
 
+func chooseServeTransports(cfg store.Config, requested string) ([]string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		transport, err := chooseServeTransport(cfg, requested)
+		if err != nil {
+			return nil, err
+		}
+		return []string{transport}, nil
+	}
+
+	transports := make([]string, 0, 2)
+	if _, err := cfg.Telegram(); err == nil {
+		transports = append(transports, "telegram")
+	}
+	if _, err := cfg.Slack(); err == nil {
+		transports = append(transports, "slack")
+	}
+	if len(transports) == 0 {
+		return nil, fmt.Errorf("no valid transport configured")
+	}
+	return transports, nil
+}
+
+func cloneBackends(backends map[string]oneagent.Backend) map[string]oneagent.Backend {
+	cloned := make(map[string]oneagent.Backend, len(backends))
+	for name, backend := range backends {
+		cloned[name] = backend
+	}
+	return cloned
+}
+
+func newTelegramClient(backends map[string]oneagent.Backend) *oneagent.Client {
+	cloned := cloneBackends(backends)
+	botpkg.ApplySystemPrompt(cloned)
+	return &oneagent.Client{Backends: cloned}
+}
+
+func newSlackClient(backends map[string]oneagent.Backend) *oneagent.Client {
+	cloned := cloneBackends(backends)
+	slackpkg.ApplySystemPrompt(cloned)
+	return &oneagent.Client{Backends: cloned}
+}
+
+type serveTransportRuntime struct {
+	name string
+	run  func(context.Context) error
+}
+
+type serveTransportResult struct {
+	name string
+	err  error
+}
+
+func runServeSupervisor(ctx context.Context, transports []serveTransportRuntime) error {
+	if len(transports) == 0 {
+		return fmt.Errorf("no serve transports configured")
+	}
+
+	results := make(chan serveTransportResult, len(transports))
+	for _, transport := range transports {
+		transport := transport
+		go func() {
+			log.Printf("starting %s transport", transport.name)
+			results <- serveTransportResult{name: transport.name, err: transport.run(ctx)}
+		}()
+	}
+
+	failures := 0
+	remaining := len(transports)
+	for remaining > 0 {
+		result := <-results
+		remaining--
+		switch {
+		case result.err != nil && ctx.Err() == nil && !dispatch.IsShuttingDown():
+			failures++
+			log.Printf("%s transport exited with error: %v", result.name, result.err)
+		case result.err != nil:
+			log.Printf("%s transport stopped: %v", result.name, result.err)
+		default:
+			log.Printf("%s transport stopped", result.name)
+		}
+	}
+
+	if failures == len(transports) {
+		return fmt.Errorf("all configured transports failed")
+	}
+	return nil
+}
+
 func cmdServe() {
 	cfg, err := store.LoadConfig()
 	if err != nil {
@@ -800,34 +1299,49 @@ func cmdServe() {
 		fatal("no backends: %v", err)
 	}
 
-	client := &oneagent.Client{Backends: backends}
 	schedules := newScheduleStore()
 	if err := schedules.Repair(store.JobExists); err != nil {
 		log.Printf("schedule repair failed: %v", err)
 	}
-	transport, err := chooseServeTransport(cfg, flags.transport)
+	transports, err := chooseServeTransports(cfg, flags.transport)
 	if err != nil {
 		fatal("%v", err)
 	}
 
-	switch transport {
-	case "telegram":
-		cmdServeTelegram(cfg, defaultCWD, client, schedules)
-	case "slack":
-		cmdServeSlack(cfg, defaultCWD, client, schedules)
-	default:
-		fatal("unsupported transport: %s", transport)
-	}
-}
+	dispatch.SetShuttingDown(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	installSignalHandlerWithCancel(cancel)
 
-func installSignalHandler() {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		dispatch.SetShuttingDown(true)
-		log.Println("shutdown requested; draining current work")
-	}()
+	runtimes := make([]serveTransportRuntime, 0, len(transports))
+	for _, transport := range transports {
+		switch transport {
+		case "telegram":
+			client := newTelegramClient(backends)
+			runtimes = append(runtimes, serveTransportRuntime{
+				name: "telegram",
+				run: func(ctx context.Context) error {
+					return runTelegramTransport(ctx, cfg, defaultCWD, client, schedules)
+				},
+			})
+		case "slack":
+			client := newSlackClient(backends)
+			runtimes = append(runtimes, serveTransportRuntime{
+				name: "slack",
+				run: func(ctx context.Context) error {
+					return runSlackTransport(ctx, cfg, defaultCWD, client, schedules)
+				},
+			})
+		default:
+			fatal("unsupported transport: %s", transport)
+		}
+	}
+
+	startSubagentWatcher(ctx, cfg, backends, schedules)
+
+	if err := runServeSupervisor(ctx, runtimes); err != nil {
+		fatal("%v", err)
+	}
 }
 
 func installSignalHandlerWithCancel(cancel func()) {
@@ -843,12 +1357,10 @@ func installSignalHandlerWithCancel(cancel func()) {
 	}()
 }
 
-func cmdServeTelegram(cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) {
-	botpkg.ApplySystemPrompt(client.Backends)
-
+func runTelegramTransport(ctx context.Context, cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) error {
 	bot, err := botpkg.NewBot(cfg)
 	if err != nil {
-		fatal("bot init failed: %v", err)
+		return fmt.Errorf("bot init failed: %w", err)
 	}
 
 	botpkg.RecoverPendingJobs(bot, client, schedules)
@@ -856,13 +1368,13 @@ func cmdServeTelegram(cfg store.Config, defaultCWD string, client *oneagent.Clie
 		botpkg.SeedCursor(bot, getUpdates)
 	}
 	botpkg.RegisterCommands(bot)
-	startScheduleLoop(bot, client, schedules, botpkg.ConfigConversation(cfg).ID())
-	startDeliveryRetryLoop(bot, client, schedules)
+	conversation := botpkg.ConfigConversation(cfg)
+	startScheduleLoopTelegram(ctx, bot, client, schedules, conversation.ID())
+	startDeliveryRetryLoopTelegram(ctx, bot, client, schedules)
 
 	cursor := botpkg.ReadCursor()
-	st := store.ReadState()
-	log.Printf("serving telegram — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
-	installSignalHandler()
+	st := store.ReadConversationState(conversation.ID())
+	log.Printf("telegram transport ready — conversation=%s backend=%s thread=%s cwd=%s", conversation.ID(), st.Backend, st.ThreadID, defaultCWD)
 
 	offset := func() int {
 		if cursor > 0 {
@@ -871,23 +1383,21 @@ func cmdServeTelegram(cfg store.Config, defaultCWD string, client *oneagent.Clie
 		return 0
 	}
 
-	for !dispatch.IsShuttingDown() {
+	for ctx.Err() == nil && !dispatch.IsShuttingDown() {
 		for _, u := range getUpdates(bot, offset(), 30) {
-			if dispatch.IsShuttingDown() {
-				log.Println("shutting down")
-				return
+			if ctx.Err() != nil || dispatch.IsShuttingDown() {
+				return nil
 			}
-			st = store.ReadState()
+			st = store.ReadConversationState(conversation.ID())
 			botpkg.HandleUpdate(u, bot, &cfg, defaultCWD, st, client)
 			cursor = u.ID
 			botpkg.WriteCursor(cursor)
-			if dispatch.IsShuttingDown() {
-				log.Println("shutting down")
-				return
+			if ctx.Err() != nil || dispatch.IsShuttingDown() {
+				return nil
 			}
 		}
 	}
-	log.Println("shutting down")
+	return nil
 }
 
 func slackDefaultConversation(cfg store.Config) chat.ConversationRef {
@@ -901,30 +1411,26 @@ func slackDefaultConversation(cfg store.Config) chat.ConversationRef {
 	}
 }
 
-func cmdServeSlack(cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) {
-	slackpkg.ApplySystemPrompt(client.Backends)
-
+func runSlackTransport(ctx context.Context, cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) error {
 	adapter, err := slackpkg.New(&cfg, defaultCWD, client, schedules)
 	if err != nil {
-		fatal("slack init failed: %v", err)
+		return fmt.Errorf("slack init failed: %w", err)
 	}
 
 	slackpkg.RecoverPendingJobs(adapter.API(), client, schedules)
 	defaultConversation := slackDefaultConversation(cfg)
 	if defaultConversation.ChannelID != "" {
-		startScheduleLoopSlack(adapter.API(), client, schedules, defaultConversation.ID())
+		startScheduleLoopSlack(ctx, adapter.API(), client, schedules, defaultConversation.ID())
 	}
-	startDeliveryRetryLoopSlack(adapter.API(), client, schedules)
+	startDeliveryRetryLoopSlack(ctx, adapter.API(), client, schedules)
 
-	st := store.ReadState()
-	log.Printf("serving slack — backend=%s, thread=%s, cwd=%s", st.Backend, st.ThreadID, defaultCWD)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	installSignalHandlerWithCancel(cancel)
+	st := store.ReadConversationState(defaultConversation.ID())
+	log.Printf("slack transport ready — conversation=%s backend=%s thread=%s cwd=%s", defaultConversation.ID(), st.Backend, st.ThreadID, defaultCWD)
 
-	if err := adapter.Run(ctx); err != nil && !dispatch.IsShuttingDown() {
-		fatal("slack serve failed: %v", err)
+	if err := adapter.Run(ctx); err != nil && ctx.Err() == nil && !dispatch.IsShuttingDown() {
+		return fmt.Errorf("slack serve failed: %w", err)
 	}
+	return nil
 }
 
 // --- Message display (for CLI subcommands) ---

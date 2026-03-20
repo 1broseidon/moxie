@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/1broseidon/moxie/internal/dispatch"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
 )
@@ -84,7 +84,7 @@ func HandleInbound(msg InboundMessage, cfg Settings, defaultCWD string, st store
 		if !isSupportedCommand(base) {
 			return HandleResult{ImmediateReply: "Unknown command. Try /new, /model, /cwd, /threads, or /compact."}
 		}
-		return HandleResult{ImmediateReply: HandleCommand(text, client, cfg)}
+		return HandleResult{ImmediateReply: HandleCommand(msg.Conversation.ID(), text, client, cfg)}
 	}
 
 	prompt := strings.TrimSpace(msg.Prompt)
@@ -114,13 +114,13 @@ func HandleInbound(msg InboundMessage, cfg Settings, defaultCWD string, st store
 	}
 }
 
-func HandleCommand(text string, client *oneagent.Client, cfg Settings) string {
+func HandleCommand(conversationID, text string, client *oneagent.Client, cfg Settings) string {
 	base, arg := parseCommand(text)
-	st := store.ReadState()
+	st := store.ReadConversationState(conversationID)
 
 	switch base {
 	case "new":
-		return handleNew(arg, st, client, cfg)
+		return handleNew(conversationID, arg, st, client, cfg)
 	case "model":
 		if arg == "" {
 			b := client.Backends[st.Backend]
@@ -130,11 +130,11 @@ func HandleCommand(text string, client *oneagent.Client, cfg Settings) string {
 			}
 			return fmt.Sprintf("Backend: %s\nModel: %s", st.Backend, model)
 		}
-		return switchModel(arg, st, client)
+		return switchModel(conversationID, arg, st, client)
 	case "cwd":
-		return handleCWD(arg, st, cfg)
+		return handleCWD(conversationID, arg, st, cfg, client)
 	case "threads":
-		return handleThreads(arg, st, client)
+		return handleThreads(conversationID, arg, st, client)
 	case "compact":
 		if err := client.CompactThread(st.ThreadID, st.Backend); err != nil {
 			return "Compact failed: " + err.Error()
@@ -166,7 +166,7 @@ func isSupportedCommand(name string) bool {
 	}
 }
 
-func handleNew(arg string, st store.State, client *oneagent.Client, cfg Settings) string {
+func handleNew(conversationID, arg string, st store.State, client *oneagent.Client, cfg Settings) string {
 	for _, word := range strings.Fields(arg) {
 		if _, ok := client.Backends[word]; ok {
 			st.Backend = word
@@ -187,8 +187,14 @@ func handleNew(arg string, st store.State, client *oneagent.Client, cfg Settings
 			return fmt.Sprintf("Unknown backend or workspace: %s", word)
 		}
 	}
-	st.ThreadID = fmt.Sprintf("chat-%d", time.Now().Unix())
-	store.WriteState(st)
+	existing := make(map[string]bool)
+	if ids, err := client.ListThreads(); err == nil {
+		for _, id := range ids {
+			existing[id] = true
+		}
+	}
+	st.ThreadID = NewThreadName(existing)
+	store.WriteConversationState(conversationID, st)
 	cwd := st.CWD
 	if cwd == "" {
 		cwd = "(default)"
@@ -227,7 +233,13 @@ func resolveDir(path string) (string, error) {
 	return abs, nil
 }
 
-func handleCWD(arg string, st store.State, cfg Settings) string {
+func resetNativeSession(client *oneagent.Client, st store.State) {
+	if !dispatch.ClearNativeSession(client, st) {
+		return
+	}
+}
+
+func handleCWD(conversationID, arg string, st store.State, cfg Settings, client *oneagent.Client) string {
 	if arg == "" {
 		cwd := st.CWD
 		if cwd == "" {
@@ -272,14 +284,15 @@ func handleCWD(arg string, st store.State, cfg Settings) string {
 				cfg.SaveWorkspaces(cfg.Workspaces)
 			}
 		}
+		resetNativeSession(client, st)
 		st.CWD = resolved
-		store.WriteState(st)
+		store.WriteConversationState(conversationID, st)
 		return fmt.Sprintf("CWD: %s (%s)", name, st.CWD)
 	}
 	return "Unknown workspace: " + name + "\n/cwd <name> <path> to create"
 }
 
-func switchModel(arg string, st store.State, client *oneagent.Client) string {
+func switchModel(conversationID, arg string, st store.State, client *oneagent.Client) string {
 	parts := strings.SplitN(arg, " ", 2)
 	if _, ok := client.Backends[parts[0]]; ok {
 		st.Backend = parts[0]
@@ -287,21 +300,21 @@ func switchModel(arg string, st store.State, client *oneagent.Client) string {
 		if len(parts) > 1 {
 			st.Model = parts[1]
 		}
-		store.WriteState(st)
+		store.WriteConversationState(conversationID, st)
 		if st.Model != "" {
 			return fmt.Sprintf("Switched to %s (%s)", st.Backend, st.Model)
 		}
 		return "Switched to " + st.Backend
 	}
 	st.Model = arg
-	store.WriteState(st)
+	store.WriteConversationState(conversationID, st)
 	return "Model set to " + arg
 }
 
-func handleThreads(arg string, st store.State, client *oneagent.Client) string {
+func handleThreads(conversationID, arg string, st store.State, client *oneagent.Client) string {
 	if arg != "" {
 		st.ThreadID = arg
-		store.WriteState(st)
+		store.WriteConversationState(conversationID, st)
 		return "Switched to thread " + arg
 	}
 	ids, err := client.ListThreads()

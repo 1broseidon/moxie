@@ -1,0 +1,177 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/1broseidon/moxie/internal/dispatch"
+	"github.com/1broseidon/moxie/internal/store"
+	"github.com/1broseidon/oneagent"
+)
+
+func TestChooseServeTransportsReturnsAllConfigured(t *testing.T) {
+	cfg := store.Config{
+		Channels: map[string]store.ChannelConfig{
+			"telegram": {
+				Provider:  "telegram",
+				Token:     "tg-token",
+				ChannelID: "123",
+			},
+			"slack": {
+				Provider:  "slack",
+				Token:     "xoxb-token",
+				AppToken:  "xapp-token",
+				ChannelID: "C123",
+			},
+		},
+	}
+
+	got, err := chooseServeTransports(cfg, "")
+	if err != nil {
+		t.Fatalf("chooseServeTransports() err = %v", err)
+	}
+	if len(got) != 2 || got[0] != "telegram" || got[1] != "slack" {
+		t.Fatalf("chooseServeTransports() = %v, want [telegram slack]", got)
+	}
+}
+
+func TestRunServeSupervisorKeepsHealthyTransportRunningAfterPeerFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	healthyStarted := make(chan struct{})
+	healthyStopped := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runServeSupervisor(ctx, []serveTransportRuntime{
+			{
+				name: "broken",
+				run: func(context.Context) error {
+					return errors.New("boom")
+				},
+			},
+			{
+				name: "healthy",
+				run: func(ctx context.Context) error {
+					close(healthyStarted)
+					<-ctx.Done()
+					close(healthyStopped)
+					return nil
+				},
+			},
+		})
+	}()
+
+	select {
+	case <-healthyStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("healthy transport did not start")
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("supervisor exited early: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	cancel()
+
+	select {
+	case <-healthyStopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("healthy transport did not stop after cancellation")
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runServeSupervisor() err = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not finish after cancellation")
+	}
+}
+
+func TestRunServeSupervisorFailsWhenAllTransportsFail(t *testing.T) {
+	err := runServeSupervisor(context.Background(), []serveTransportRuntime{
+		{
+			name: "telegram",
+			run: func(context.Context) error {
+				return errors.New("telegram down")
+			},
+		},
+		{
+			name: "slack",
+			run: func(context.Context) error {
+				return errors.New("slack down")
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected supervisor error when all transports fail")
+	}
+}
+
+func TestDispatchSynthesisPreservesParentStateAndReplyConversation(t *testing.T) {
+	restoreStore := store.SetConfigDir(t.TempDir())
+	t.Cleanup(restoreStore)
+
+	store.WriteConversationState("slack:C123", store.State{
+		Backend:  "pi",
+		Model:    "small",
+		ThreadID: "wrong-thread",
+	})
+
+	restoreRun := dispatch.SetRunModelFuncForTest(func(job *store.PendingJob, _ *oneagent.Client, _ func(string)) (string, bool) {
+		if job.Source != "subagent-synthesis" {
+			t.Fatalf("job source = %q, want subagent-synthesis", job.Source)
+		}
+		if got := job.State; got != (store.State{
+			Backend:  "claude",
+			Model:    "sonnet",
+			ThreadID: "parent-thread",
+		}) {
+			t.Fatalf("synthesis state = %+v, want preserved parent state", got)
+		}
+		if job.ReplyConversation != "slack:C123:1710.9" {
+			t.Fatalf("reply conversation = %q, want original Slack reply thread", job.ReplyConversation)
+		}
+		return "synthesized", false
+	})
+	t.Cleanup(restoreRun)
+
+	subJob := store.PendingJob{
+		ID:                "job-sub",
+		ConversationID:    "slack:C123",
+		ReplyConversation: "slack:C123:1710.9",
+		DelegatedTask:     "inspect logs",
+		DelegationContext: "user asked about a crash",
+		State: store.State{
+			Backend:  "pi",
+			Model:    "small",
+			ThreadID: "sub-thread",
+		},
+		SynthesisState: store.State{
+			Backend:  "claude",
+			Model:    "sonnet",
+			ThreadID: "parent-thread",
+		},
+	}
+
+	var delivered store.PendingJob
+	if err := dispatchSynthesis(subJob, "worker result", nil, nil, func(job store.PendingJob) error {
+		delivered = job
+		return nil
+	}); err != nil {
+		t.Fatalf("dispatchSynthesis(): %v", err)
+	}
+
+	if delivered.Result != "synthesized" {
+		t.Fatalf("delivered result = %q, want synthesized", delivered.Result)
+	}
+	if delivered.ReplyConversation != "slack:C123:1710.9" {
+		t.Fatalf("delivered reply conversation = %q, want original reply target", delivered.ReplyConversation)
+	}
+}

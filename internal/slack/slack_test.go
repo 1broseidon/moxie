@@ -75,11 +75,6 @@ func TestIsDirectMessageEventRejectsBotAndSubtypes(t *testing.T) {
 	}
 }
 
-type fakeSocket struct {
-	events []interface{}
-	ch     chan interface{}
-}
-
 func TestChatSettingsPersistsWorkspaces(t *testing.T) {
 	useSlackStoreDir(t)
 

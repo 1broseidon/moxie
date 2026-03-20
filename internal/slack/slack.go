@@ -302,7 +302,7 @@ func (a *Adapter) processInbound(envelope inboundEnvelope) {
 		}
 	}()
 
-	st := store.ReadState()
+	st := store.ReadConversationState(envelope.inbound.Conversation.ID())
 	result := chat.HandleInbound(envelope.inbound, chatSettings(a.cfg), a.defaultCWD, st, a.client)
 	if result.ImmediateReply != "" {
 		SendImmediate(a.api, envelope.reply, result.ImmediateReply)
@@ -310,6 +310,7 @@ func (a *Adapter) processInbound(envelope inboundEnvelope) {
 	if result.Job == nil {
 		return
 	}
+	result.Job.ReplyConversation = envelope.reply.ID()
 	writeJobState(result.Job.ID, jobState{ReplyConversation: envelope.reply})
 	ProcessJob(*result.Job, a.api, a.client, a.schedules)
 }
@@ -350,7 +351,10 @@ func (a *Adapter) slashCommandPayload(cmd goslack.SlashCommand) map[string]inter
 		SenderName: senderName(cmd.UserID),
 		Text:       text,
 		Prompt:     text,
-	}, chatSettings(a.cfg), a.defaultCWD, store.ReadState(), a.client)
+	}, chatSettings(a.cfg), a.defaultCWD, store.ReadConversationState(chat.ConversationRef{
+		Provider:  chat.ProviderSlack,
+		ChannelID: cmd.ChannelID,
+	}.ID()), a.client)
 
 	switch {
 	case result.ImmediateReply != "":

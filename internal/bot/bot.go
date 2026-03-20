@@ -90,10 +90,7 @@ func renderActivityHTML(activity string) string {
 
 	words := strings.Fields(activity)
 	verb := strings.ToLower(words[0])
-	detail := ""
-	if len(words) > 1 {
-		detail = strings.Join(words[1:], " ")
-	}
+	detail := activity
 
 	summary := "Working…"
 	switch verb {
@@ -107,9 +104,6 @@ func renderActivityHTML(activity string) string {
 		summary = "Running command…"
 	case "rg", "grep", "find", "ls", "glob":
 		summary = "Searching…"
-		detail = activity
-	default:
-		detail = activity
 	}
 
 	msg := "<i>" + html.EscapeString(summary) + "</i>"
@@ -242,7 +236,9 @@ func RegisterCommands(bot sender) {
 	}
 	data, err := json.Marshal(map[string]any{"commands": cmds})
 	store.Check(err)
-	bot.Raw("setMyCommands", json.RawMessage(data))
+	if _, err := bot.Raw("setMyCommands", json.RawMessage(data)); err != nil {
+		log.Printf("register telegram commands error: %v", err)
+	}
 }
 
 func SeedCursor(bot *tb.Bot, fetchUpdates func(*tb.Bot, int, int) []tb.Update) {
@@ -321,10 +317,12 @@ func StartTyping(bot sender, conversation chat.ConversationRef) func() {
 	done := make(chan struct{})
 	go func() {
 		for {
-			bot.Raw("sendChatAction", map[string]string{
+			if _, err := bot.Raw("sendChatAction", map[string]string{
 				"chat_id": strconv.FormatInt(chatID, 10),
 				"action":  "typing",
-			})
+			}); err != nil {
+				log.Printf("telegram typing action error: %v", err)
+			}
 			select {
 			case <-done:
 				return
@@ -385,7 +383,11 @@ func SaveTelegramFile(bot fileSender, file *tb.File, originalName, fallbackBase,
 	if err != nil {
 		return "", fmt.Errorf("telegram file download failed: %w", err)
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			log.Printf("telegram file reader close error: %v", err)
+		}
+	}()
 
 	dir := filepath.Join(os.TempDir(), "moxie-media")
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -396,7 +398,11 @@ func SaveTelegramFile(bot fileSender, file *tb.File, originalName, fallbackBase,
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
-	defer dst.Close()
+	defer func() {
+		if err := dst.Close(); err != nil {
+			log.Printf("telegram temp file close error: %v", err)
+		}
+	}()
 
 	if _, err := io.Copy(dst, reader); err != nil {
 		return "", fmt.Errorf("save temp file: %w", err)
@@ -564,12 +570,22 @@ func ProcessJob(job PendingJob, bot sender, client *oneagent.Client, schedules *
 	dispatch.ProcessJob(&job, client, schedules, telegramDispatchCallbacks(bot, &job, stopTyping))
 }
 
+func isTelegramJob(job store.PendingJob) bool {
+	if job.Source == "subagent" {
+		return false
+	}
+	if chat.ParseConversationID(job.ConversationID).Provider == chat.ProviderTelegram {
+		return true
+	}
+	return job.Source == string(chat.ProviderTelegram)
+}
+
 func RecoverPendingJobs(bot sender, client *oneagent.Client, schedules *scheduler.Store) bool {
 	maxRecovered := maxTelegramSourceEventID(store.ListJobs())
 	recovered := dispatch.RecoverPendingJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		stopTyping := newTypingStopper(bot, conversationFromID(job.ConversationID), job.Status != "ready" && job.Status != "delivered")
 		return telegramDispatchCallbacks(bot, job, stopTyping)
-	})
+	}, isTelegramJob)
 	if maxRecovered > ReadCursor() {
 		WriteCursor(maxRecovered)
 	}
@@ -580,7 +596,7 @@ func RetryDeliverableJobs(bot sender, client *oneagent.Client, schedules *schedu
 	return dispatch.RetryDeliverableJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		stopTyping := newTypingStopper(bot, conversationFromID(job.ConversationID), job.Status != "ready" && job.Status != "delivered")
 		return telegramDispatchCallbacks(bot, job, stopTyping)
-	})
+	}, isTelegramJob)
 }
 
 func HandleUpdate(u tb.Update, bot fileSender, cfg *store.Config, defaultCWD string, st store.State, client *oneagent.Client) {

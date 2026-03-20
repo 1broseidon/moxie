@@ -35,6 +35,10 @@ func readJobState(jobID string) jobState {
 	return st
 }
 
+func ReadReplyConversation(jobID string) chat.ConversationRef {
+	return readJobState(jobID).ReplyConversation
+}
+
 func writeJobState(jobID string, st jobState) {
 	if err := os.MkdirAll(statusDir(), 0o700); err != nil {
 		return

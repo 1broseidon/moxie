@@ -12,8 +12,9 @@ import (
 )
 
 type Config struct {
-	Channels   map[string]ChannelConfig `json:"channels,omitempty"`
-	Workspaces map[string]string        `json:"workspaces,omitempty"`
+	Channels         map[string]ChannelConfig `json:"channels,omitempty"`
+	Workspaces       map[string]string        `json:"workspaces,omitempty"`
+	SubagentMaxDepth int                      `json:"subagent_max_depth,omitempty"`
 }
 
 type ChannelConfig struct {
@@ -24,10 +25,11 @@ type ChannelConfig struct {
 }
 
 type configFile struct {
-	Channels   map[string]ChannelConfig `json:"channels,omitempty"`
-	Workspaces map[string]string        `json:"workspaces,omitempty"`
-	Token      string                   `json:"token,omitempty"`
-	ChatID     int64                    `json:"chat_id,omitempty"`
+	Channels         map[string]ChannelConfig `json:"channels,omitempty"`
+	Workspaces       map[string]string        `json:"workspaces,omitempty"`
+	SubagentMaxDepth int                      `json:"subagent_max_depth,omitempty"`
+	Token            string                   `json:"token,omitempty"`
+	ChatID           int64                    `json:"chat_id,omitempty"`
 }
 
 var cfgDir string
@@ -57,8 +59,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("config not found: %w\nRun: moxie init", err)
 	}
 	cfg := Config{
-		Channels:   file.Channels,
-		Workspaces: file.Workspaces,
+		Channels:         file.Channels,
+		Workspaces:       file.Workspaces,
+		SubagentMaxDepth: file.SubagentMaxDepth,
 	}
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = map[string]string{}
@@ -122,6 +125,13 @@ func (cfg Config) Slack() (ChannelConfig, error) {
 	return slack, nil
 }
 
+func (cfg Config) MaxSubagentDepth() int {
+	if cfg.SubagentMaxDepth > 0 {
+		return cfg.SubagentMaxDepth
+	}
+	return 3
+}
+
 func (cfg Config) channel(name string) (ChannelConfig, error) {
 	c, ok := cfg.Channels[name]
 	if !ok {
@@ -164,19 +174,30 @@ type State struct {
 	CWD      string `json:"cwd,omitempty"`
 }
 
+type stateFile struct {
+	Default       State            `json:"default,omitempty"`
+	Conversations map[string]State `json:"conversations,omitempty"`
+}
+
 type PendingJob struct {
-	ID             string    `json:"id"`
-	SourceEventID  string    `json:"source_event_id,omitempty"`
-	ScheduleID     string    `json:"schedule_id,omitempty"`
-	ConversationID string    `json:"conversation_id"`
-	Source         string    `json:"source,omitempty"`
-	Prompt         string    `json:"prompt"`
-	CWD            string    `json:"cwd,omitempty"`
-	TempPath       string    `json:"temp_path,omitempty"`
-	State          State     `json:"state"`
-	Status         string    `json:"status"`
-	Result         string    `json:"result,omitempty"`
-	Updated        time.Time `json:"updated"`
+	ID                string    `json:"id"`
+	SourceEventID     string    `json:"source_event_id,omitempty"`
+	ScheduleID        string    `json:"schedule_id,omitempty"`
+	ParentJobID       string    `json:"parent_job_id,omitempty"`
+	DelegatedTask     string    `json:"delegated_task,omitempty"`
+	DelegationContext string    `json:"delegation_context,omitempty"`
+	ReplyConversation string    `json:"reply_conversation,omitempty"`
+	Depth             int       `json:"depth,omitempty"`
+	ConversationID    string    `json:"conversation_id"`
+	Source            string    `json:"source,omitempty"`
+	Prompt            string    `json:"prompt"`
+	CWD               string    `json:"cwd,omitempty"`
+	TempPath          string    `json:"temp_path,omitempty"`
+	SynthesisState    State     `json:"synthesis_state,omitempty"`
+	State             State     `json:"state"`
+	Status            string    `json:"status"`
+	Result            string    `json:"result,omitempty"`
+	Updated           time.Time `json:"updated"`
 }
 
 func ConfigFile(name string) string {
@@ -197,9 +218,7 @@ func WriteJSON(name string, v any) {
 	Check(os.WriteFile(ConfigFile(name), data, 0600))
 }
 
-func ReadState() State {
-	var s State
-	ReadJSON("state.json", &s)
+func normalizeState(s State) State {
 	if s.Backend == "" {
 		s.Backend = "claude"
 	}
@@ -209,7 +228,81 @@ func ReadState() State {
 	return s
 }
 
-func WriteState(s State) { WriteJSON("state.json", s) }
+func loadStateFile() stateFile {
+	var doc stateFile
+	data, err := os.ReadFile(ConfigFile("state.json"))
+	if err != nil {
+		return stateFile{Conversations: map[string]State{}}
+	}
+	if err := json.Unmarshal(data, &doc); err == nil && (doc.Default != (State{}) || len(doc.Conversations) > 0) {
+		if doc.Conversations == nil {
+			doc.Conversations = map[string]State{}
+		}
+		doc.Default = normalizeState(doc.Default)
+		for id, st := range doc.Conversations {
+			doc.Conversations[id] = normalizeState(st)
+		}
+		return doc
+	}
+
+	var legacy State
+	if err := json.Unmarshal(data, &legacy); err == nil {
+		return stateFile{
+			Default:       normalizeState(legacy),
+			Conversations: map[string]State{},
+		}
+	}
+
+	log.Printf("error: parse state.json")
+	return stateFile{Conversations: map[string]State{}}
+}
+
+func saveStateFile(doc stateFile) {
+	if doc.Conversations == nil {
+		doc.Conversations = map[string]State{}
+	}
+	doc.Default = normalizeState(doc.Default)
+	for id, st := range doc.Conversations {
+		doc.Conversations[id] = normalizeState(st)
+	}
+	WriteJSON("state.json", doc)
+}
+
+func ReadState() State {
+	return normalizeState(loadStateFile().Default)
+}
+
+func WriteState(s State) {
+	doc := loadStateFile()
+	doc.Default = normalizeState(s)
+	saveStateFile(doc)
+}
+
+func ReadConversationState(conversationID string) State {
+	doc := loadStateFile()
+	if conversationID != "" {
+		if st, ok := doc.Conversations[conversationID]; ok {
+			return normalizeState(st)
+		}
+	}
+	if doc.Default == (State{}) {
+		return normalizeState(State{})
+	}
+	return normalizeState(doc.Default)
+}
+
+func WriteConversationState(conversationID string, s State) {
+	if conversationID == "" {
+		WriteState(s)
+		return
+	}
+	doc := loadStateFile()
+	if doc.Conversations == nil {
+		doc.Conversations = map[string]State{}
+	}
+	doc.Conversations[conversationID] = normalizeState(s)
+	saveStateFile(doc)
+}
 
 func JobsDir() string {
 	return filepath.Join(ConfigDir(), "jobs")
@@ -228,6 +321,19 @@ func WriteJob(job PendingJob) {
 	data, err := json.Marshal(job)
 	Check(err)
 	Check(os.WriteFile(JobFile(job.ID), data, 0600))
+}
+
+func ReadJob(jobID string) (PendingJob, bool) {
+	data, err := os.ReadFile(JobFile(jobID))
+	if err != nil {
+		return PendingJob{}, false
+	}
+	var job PendingJob
+	if err := json.Unmarshal(data, &job); err != nil {
+		log.Printf("error: parse job %s: %v", jobID, err)
+		return PendingJob{}, false
+	}
+	return job, true
 }
 
 func RemoveJob(jobID string) {

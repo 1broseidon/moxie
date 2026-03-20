@@ -141,6 +141,51 @@ func TestReadWriteStateDefaultsAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConversationStateRoundTripAndDefaultFallback(t *testing.T) {
+	useTempConfigDir(t)
+
+	WriteState(State{
+		Backend:  "claude",
+		ThreadID: "default-thread",
+		CWD:      "/tmp/default",
+	})
+
+	tgConversation := "telegram:123"
+	slackConversation := "slack:C123:1710000000.100"
+	tgState := State{
+		Backend:  "pi",
+		Model:    "small",
+		ThreadID: "tg-thread",
+		CWD:      "/tmp/tg",
+	}
+	slackState := State{
+		Backend:  "claude",
+		Model:    "sonnet",
+		ThreadID: "slack-thread",
+		CWD:      "/tmp/slack",
+	}
+
+	WriteConversationState(tgConversation, tgState)
+	WriteConversationState(slackConversation, slackState)
+
+	if got := ReadConversationState(tgConversation); got != tgState {
+		t.Fatalf("ReadConversationState(%q) = %+v, want %+v", tgConversation, got, tgState)
+	}
+	if got := ReadConversationState(slackConversation); got != slackState {
+		t.Fatalf("ReadConversationState(%q) = %+v, want %+v", slackConversation, got, slackState)
+	}
+
+	got := ReadConversationState("telegram:other")
+	want := State{
+		Backend:  "claude",
+		ThreadID: "default-thread",
+		CWD:      "/tmp/default",
+	}
+	if got != want {
+		t.Fatalf("ReadConversationState(fallback) = %+v, want %+v", got, want)
+	}
+}
+
 func TestJobsRoundTripSortedAndSkipsCorruptEntries(t *testing.T) {
 	dir := useTempConfigDir(t)
 
@@ -164,6 +209,30 @@ func TestJobsRoundTripSortedAndSkipsCorruptEntries(t *testing.T) {
 	RemoveJob("job-10")
 	if JobExists("job-10") {
 		t.Fatal("expected job job-10 to be removed")
+	}
+}
+
+func TestReadJobRoundTripAndMissing(t *testing.T) {
+	useTempConfigDir(t)
+
+	want := PendingJob{
+		ID:             "job-read",
+		ConversationID: "telegram:123",
+		Status:         "ready",
+		Result:         "hello",
+	}
+	WriteJob(want)
+
+	got, ok := ReadJob(want.ID)
+	if !ok {
+		t.Fatal("expected ReadJob to find persisted job")
+	}
+	if got.ID != want.ID || got.ConversationID != want.ConversationID || got.Status != want.Status || got.Result != want.Result {
+		t.Fatalf("ReadJob() = %+v, want %+v", got, want)
+	}
+
+	if _, ok := ReadJob("missing-job"); ok {
+		t.Fatal("expected ReadJob to report missing job")
 	}
 }
 

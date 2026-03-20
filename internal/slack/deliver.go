@@ -76,10 +76,7 @@ func renderActivityText(activity string) string {
 
 	words := strings.Fields(activity)
 	verb := strings.ToLower(words[0])
-	detail := ""
-	if len(words) > 1 {
-		detail = strings.Join(words[1:], " ")
-	}
+	detail := activity
 
 	summary := "Working..."
 	switch verb {
@@ -93,9 +90,6 @@ func renderActivityText(activity string) string {
 		summary = "Running command..."
 	case "rg", "grep", "find", "ls", "glob":
 		summary = "Searching..."
-		detail = activity
-	default:
-		detail = activity
 	}
 
 	if detail == "" {
@@ -230,6 +224,12 @@ func fileUploadNotice(paths []string) string {
 }
 
 func replyConversationForJob(job *store.PendingJob, st jobState) chat.ConversationRef {
+	if job != nil {
+		target := conversationFromID(job.ReplyConversation)
+		if target.Provider == chat.ProviderSlack && target.ChannelID != "" {
+			return target
+		}
+	}
 	if st.ReplyConversation.Provider == chat.ProviderSlack && st.ReplyConversation.ChannelID != "" {
 		return st.ReplyConversation
 	}
@@ -263,11 +263,12 @@ func SendImmediate(api messenger, conversation chat.ConversationRef, text string
 	}
 
 	job := store.PendingJob{
-		ID:             store.NewJobID(),
-		ConversationID: conversation.ID(),
-		Source:         string(chat.ProviderSlack),
-		Status:         "ready",
-		Result:         text,
+		ID:                store.NewJobID(),
+		ConversationID:    conversation.ID(),
+		ReplyConversation: conversation.ID(),
+		Source:            string(chat.ProviderSlack),
+		Status:            "ready",
+		Result:            text,
 	}
 	if conversation.ThreadID != "" {
 		writeJobState(job.ID, jobState{ReplyConversation: conversation})

@@ -74,7 +74,7 @@ func TestRenderActivityHTML(t *testing.T) {
 	if !strings.Contains(got, "<i>Running command…</i>") {
 		t.Fatalf("renderActivityHTML() missing running summary: %q", got)
 	}
-	if !strings.Contains(got, "<code>ls &lt;weird&gt;</code>") {
+	if !strings.Contains(got, "<code>bash ls &lt;weird&gt;</code>") {
 		t.Fatalf("renderActivityHTML() missing escaped detail: %q", got)
 	}
 
@@ -165,6 +165,25 @@ func TestSendImmediateRetriesAfterDeliveryFailure(t *testing.T) {
 	}
 	if len(bot.sendCalls) != 2 {
 		t.Fatalf("send calls = %d, want 2", len(bot.sendCalls))
+	}
+}
+
+func TestRetryDeliverableJobsProcessesOnlyTelegramJobs(t *testing.T) {
+	useBotStoreDir(t)
+
+	bot := &fakeBot{}
+	store.WriteJob(store.PendingJob{ID: "job-tg", Status: "ready", ConversationID: "telegram:123", Result: "hello"})
+	store.WriteJob(store.PendingJob{ID: "job-synth", Source: "subagent-synthesis", Status: "ready", ConversationID: "telegram:123", Result: "synth"})
+	store.WriteJob(store.PendingJob{ID: "job-slack", Status: "ready", ConversationID: "slack:C123", Result: "ignore"})
+
+	if !RetryDeliverableJobs(bot, nil, nil) {
+		t.Fatal("expected telegram retry loop to report work")
+	}
+	if len(bot.sendCalls) != 2 || bot.sendCalls[0].text != "hello" || bot.sendCalls[1].text != "synth" {
+		t.Fatalf("send calls = %+v, want telegram delivery plus synthesis", bot.sendCalls)
+	}
+	if !store.JobExists("job-slack") {
+		t.Fatal("expected slack job to remain queued")
 	}
 }
 

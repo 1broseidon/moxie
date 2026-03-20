@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	dispatchMu   sync.Mutex
-	shuttingDown atomic.Bool
-	runModelFunc = RunModel
+	defaultDispatchMu sync.Mutex
+	dispatchLocks     sync.Map
+	shuttingDown      atomic.Bool
+	runModelFunc      = RunModel
 )
 
 func SetRunModelFuncForTest(fn func(*store.PendingJob, *oneagent.Client, func(string)) (string, bool)) func() {
@@ -77,15 +78,29 @@ func RunModel(job *store.PendingJob, client *oneagent.Client, onActivity func(ac
 	return resp.Result, false
 }
 
-func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *scheduler.Store, callbacks Callbacks) {
+func conversationLock(conversationID string) *sync.Mutex {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return &defaultDispatchMu
+	}
+	lock, _ := dispatchLocks.LoadOrStore(conversationID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+func IsSubagentJob(job *store.PendingJob) bool {
+	return job != nil && IsSubagentSource(job.Source)
+}
+
+func IsSubagentSource(source string) bool {
+	return source == "subagent" || source == "subagent-synthesis"
+}
+
+func processJob(job *store.PendingJob, client *oneagent.Client, schedules *scheduler.Store, callbacks Callbacks) {
 	defer func() {
 		if callbacks.OnDone != nil {
 			callbacks.OnDone()
 		}
 	}()
-
-	dispatchMu.Lock()
-	defer dispatchMu.Unlock()
 
 	if job.Status != "ready" && job.Status != "delivered" {
 		job.Status = "running"
@@ -122,6 +137,25 @@ func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	store.RemoveJob(job.ID)
 }
 
+func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *scheduler.Store, callbacks Callbacks) {
+	if job == nil {
+		return
+	}
+
+	// Subagent dispatch jobs skip the conversation lock so they can run
+	// concurrently with the parent dispatch that spawned them.
+	// Synthesis jobs take the lock since they run on the parent thread.
+	if job.Source == "subagent" {
+		processJob(job, client, schedules, callbacks)
+		return
+	}
+
+	lock := conversationLock(job.ConversationID)
+	lock.Lock()
+	defer lock.Unlock()
+	processJob(job, client, schedules, callbacks)
+}
+
 func CanRetryJob(job store.PendingJob) bool {
 	if job.TempPath == "" {
 		return true
@@ -136,13 +170,22 @@ func CanRetryJob(job store.PendingJob) bool {
 	return false
 }
 
-func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, callbackFactory func(*store.PendingJob) Callbacks) bool {
+func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, callbackFactory func(*store.PendingJob) Callbacks, filters ...func(store.PendingJob) bool) bool {
 	storedJobs := store.ListJobs()
 	if len(storedJobs) == 0 {
 		return false
 	}
 	log.Printf("recovering %d pending job(s)", len(storedJobs))
+	var filter func(store.PendingJob) bool
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
+	recovered := false
 	for _, storedJob := range storedJobs {
+		if filter != nil && !filter(storedJob) {
+			continue
+		}
+		recovered = true
 		job := storedJob
 		callbacks := Callbacks{}
 		if callbackFactory != nil {
@@ -170,29 +213,68 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 			store.RemoveJob(job.ID)
 		}
 	}
+	return recovered
+}
+
+func isRetryable(job store.PendingJob) bool {
+	return job.Status == "ready" || job.Status == "delivered"
+}
+
+func makeCallbacks(factory func(*store.PendingJob) Callbacks, job *store.PendingJob) Callbacks {
+	if factory != nil {
+		return factory(job)
+	}
+	return Callbacks{}
+}
+
+func retryLockedJob(storedJob store.PendingJob, client *oneagent.Client, schedules *scheduler.Store, callbackFactory func(*store.PendingJob) Callbacks, filter func(store.PendingJob) bool) bool {
+	lock := conversationLock(storedJob.ConversationID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	job, ok := store.ReadJob(storedJob.ID)
+	if !ok || !isRetryable(job) {
+		return false
+	}
+	if filter != nil && !filter(job) {
+		return false
+	}
+
+	log.Printf("retrying deliverable job %s (%s)", job.ID, job.Status)
+	processJob(&job, client, schedules, makeCallbacks(callbackFactory, &job))
 	return true
 }
 
-func RetryDeliverableJobs(client *oneagent.Client, schedules *scheduler.Store, callbackFactory func(*store.PendingJob) Callbacks) bool {
+func RetryDeliverableJobs(client *oneagent.Client, schedules *scheduler.Store, callbackFactory func(*store.PendingJob) Callbacks, filters ...func(store.PendingJob) bool) bool {
 	storedJobs := store.ListJobs()
 	if len(storedJobs) == 0 {
 		return false
 	}
 
+	var filter func(store.PendingJob) bool
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
 	retried := false
 	for _, storedJob := range storedJobs {
-		if storedJob.Status != "ready" && storedJob.Status != "delivered" {
+		if filter != nil && !filter(storedJob) {
+			continue
+		}
+		if !isRetryable(storedJob) {
 			continue
 		}
 
-		job := storedJob
-		callbacks := Callbacks{}
-		if callbackFactory != nil {
-			callbacks = callbackFactory(&job)
+		if storedJob.Source == "subagent" {
+			job := storedJob
+			log.Printf("retrying deliverable job %s (%s)", job.ID, job.Status)
+			processJob(&job, client, schedules, makeCallbacks(callbackFactory, &job))
+			retried = true
+			continue
 		}
-		log.Printf("retrying deliverable job %s (%s)", job.ID, job.Status)
-		ProcessJob(&job, client, schedules, callbacks)
-		retried = true
+
+		if retryLockedJob(storedJob, client, schedules, callbackFactory, filter) {
+			retried = true
+		}
 	}
 	return retried
 }
@@ -212,7 +294,7 @@ func IsMissingNativeSessionError(errText string) bool {
 }
 
 func ClearNativeSession(client *oneagent.Client, st store.State) bool {
-	if client == nil || client.Store == nil || st.Backend == "" || st.ThreadID == "" {
+	if client == nil || st.Backend == "" || st.ThreadID == "" {
 		return false
 	}
 
