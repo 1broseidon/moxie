@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -173,5 +174,43 @@ func TestDispatchSynthesisPreservesParentStateAndReplyConversation(t *testing.T)
 	}
 	if delivered.ReplyConversation != "slack:C123:1710.9" {
 		t.Fatalf("delivered reply conversation = %q, want original reply target", delivered.ReplyConversation)
+	}
+}
+
+func TestLoadServeBackendsUsesMoxieOverridePath(t *testing.T) {
+	restoreStore := store.SetConfigDir(t.TempDir())
+	t.Cleanup(restoreStore)
+
+	override := `{
+		"pi": {
+			"run": "pi-custom {prompt}",
+			"format": "json",
+			"result": "result",
+			"session": "session"
+		},
+		"custom": {
+			"run": "custom-agent {prompt}",
+			"format": "json",
+			"result": "result",
+			"session": "session"
+		}
+	}`
+	if err := os.WriteFile(store.ConfigFile("backends.json"), []byte(override), 0o600); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+
+	backends, err := loadServeBackends()
+	if err != nil {
+		t.Fatalf("loadServeBackends(): %v", err)
+	}
+
+	if got := backends["pi"].Cmd[0]; got != "pi-custom" {
+		t.Fatalf("pi override not applied, cmd[0] = %q", got)
+	}
+	if _, ok := backends["custom"]; !ok {
+		t.Fatalf("custom backend missing from loaded map")
+	}
+	if _, ok := backends["claude"]; !ok {
+		t.Fatal("embedded defaults should remain available")
 	}
 }

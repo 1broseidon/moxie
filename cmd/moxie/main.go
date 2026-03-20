@@ -1419,7 +1419,7 @@ func cmdServe() {
 		}
 	}
 
-	backends, err := oneagent.LoadBackends("")
+	backends, err := loadServeBackends()
 	if err != nil {
 		fatal("no backends: %v", err)
 	}
@@ -1467,6 +1467,13 @@ func cmdServe() {
 	if err := runServeSupervisor(ctx, runtimes); err != nil {
 		fatal("%v", err)
 	}
+}
+
+func loadServeBackends() (map[string]oneagent.Backend, error) {
+	return oneagent.LoadBackendsWithOptions(oneagent.LoadOptions{
+		IncludeEmbedded: true,
+		OverridePath:    store.ConfigFile("backends.json"),
+	})
 }
 
 func installSignalHandlerWithCancel(cancel func()) {
