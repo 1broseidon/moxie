@@ -13,11 +13,9 @@ func TestArtifactWriteReadRoundtrip(t *testing.T) {
 	a := Artifact{
 		ID:       NewArtifactID(),
 		JobID:    "job-123",
-		Source:   "subagent",
 		Backend:  "codex",
 		Task:     "Audit the scheduler",
-		Result:   "Found 3 issues.",
-		ThreadID: "bold-fox",
+		ThreadID: "sub-bold-fox-1234567890",
 		Created:  time.Now(),
 	}
 	if err := WriteArtifact(a); err != nil {
@@ -27,7 +25,7 @@ func TestArtifactWriteReadRoundtrip(t *testing.T) {
 	if !ok {
 		t.Fatal("artifact not found after write")
 	}
-	if got.JobID != a.JobID || got.Result != a.Result || got.Task != a.Task {
+	if got.JobID != a.JobID || got.Task != a.Task || got.ThreadID != a.ThreadID {
 		t.Fatalf("roundtrip mismatch: got %+v", got)
 	}
 }
@@ -48,13 +46,12 @@ func TestListArtifactsSortedNewestFirst(t *testing.T) {
 
 	for i, name := range []string{"first", "second", "third"} {
 		a := Artifact{
-			ID:      NewArtifactID() + "-" + name,
-			JobID:   "job-" + name,
-			Source:  "dispatch",
-			Backend: "claude",
-			Task:    name,
-			Result:  "result-" + name,
-			Created: time.Now().Add(time.Duration(i) * time.Second),
+			ID:       NewArtifactID() + "-" + name,
+			JobID:    "job-" + name,
+			Backend:  "claude",
+			Task:     name,
+			ThreadID: "sub-thread-" + name,
+			Created:  time.Now().Add(time.Duration(i) * time.Second),
 		}
 		if err := WriteArtifact(a); err != nil {
 			t.Fatalf("write %s: %v", name, err)

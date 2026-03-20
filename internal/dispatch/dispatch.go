@@ -139,28 +139,22 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 }
 
 func writeArtifact(job *store.PendingJob) {
-	if job.Result == "" {
-		return
-	}
-	// Only persist artifacts for subagent results.
-	if !IsSubagentJob(job) {
+	// Only persist artifacts for raw subagent runs, not synthesis.
+	if job.Source != "subagent" {
 		return
 	}
 	task := job.DelegatedTask
 	if task == "" {
 		task = job.Prompt
 	}
-	// Truncate task summary for metadata.
 	if len(task) > 200 {
 		task = task[:200]
 	}
 	a := store.Artifact{
 		ID:        store.NewArtifactID(),
 		JobID:     job.ID,
-		Source:    "subagent",
 		Backend:   job.State.Backend,
 		Task:      task,
-		Result:    job.Result,
 		ThreadID:  job.State.ThreadID,
 		ParentJob: job.ParentJobID,
 		Created:   time.Now(),

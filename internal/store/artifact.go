@@ -9,15 +9,14 @@ import (
 	"time"
 )
 
-// Artifact is a persisted result from a dispatch or subagent run.
+// Artifact is lightweight metadata for a subagent run.
+// The full result lives in the thread store; this is an index entry.
 type Artifact struct {
 	ID        string    `json:"id"`
 	JobID     string    `json:"job_id"`
-	Source    string    `json:"source,omitempty"` // "dispatch" or "subagent"
 	Backend   string    `json:"backend"`
 	Task      string    `json:"task"`
-	Result    string    `json:"result"`
-	ThreadID  string    `json:"thread_id,omitempty"`
+	ThreadID  string    `json:"thread_id"`
 	ParentJob string    `json:"parent_job,omitempty"`
 	Created   time.Time `json:"created"`
 }

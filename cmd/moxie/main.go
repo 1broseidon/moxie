@@ -82,6 +82,7 @@ Usage:
   moxie cursor reset                      Reset cursor to 0
   moxie schedule <subcommand>             Manage schedules
   moxie subagent --backend <name> --text <task>  Delegate work to a background agent
+  moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
   moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run configured chat transports and dispatch to agent backends`)
 }
@@ -369,7 +370,7 @@ Examples:
 }
 
 func resultUsage() {
-	fmt.Println(`moxie result — retrieve results from previous dispatches and subagents
+	fmt.Println(`moxie result — retrieve metadata and results from previous subagent runs
 
 Usage:
   moxie result list [--limit <n>]
@@ -377,17 +378,17 @@ Usage:
   moxie result search <query>
 
 Subcommands:
-  list              List recent artifacts (default last 20)
-  show <id>         Show the full result of an artifact by ID
-  search <query>    Search artifact tasks and results for a substring
+  list              List recent subagent artifacts (default last 20)
+  show <id>         Show artifact metadata and the thread ID containing the full result
+  search <query>    Search artifact tasks for a substring
 
 Flags for list:
   --limit <n>       Number of artifacts to show (default 20)
 
 When to use:
-  Use to retrieve the output of a previous dispatch or subagent run
-  Every completed dispatch and subagent produces an artifact with its full result
-  Artifacts persist after jobs are cleaned up so results are always available
+  Use to find or reference the output of a previous subagent run
+  Every completed subagent produces a lightweight artifact with metadata
+  The artifact links to the thread where the full conversation is stored
   Use search to find a specific result without knowing the artifact ID
 
 Examples:
@@ -442,7 +443,7 @@ func cmdResultList(args []string) {
 		if len(task) > 80 {
 			task = task[:80] + "..."
 		}
-		fmt.Printf("%s  %-10s  %-8s  %s  %s\n", a.ID, a.Source, a.Backend, a.Created.Format("2006-01-02 15:04"), task)
+		fmt.Printf("%s  %-8s  %s  %s\n", a.ID, a.Backend, a.Created.Format("2006-01-02 15:04"), task)
 	}
 }
 
@@ -458,7 +459,6 @@ func cmdResultShow(args []string) {
 	}
 	fmt.Printf("ID:        %s\n", a.ID)
 	fmt.Printf("Job:       %s\n", a.JobID)
-	fmt.Printf("Source:    %s\n", a.Source)
 	fmt.Printf("Backend:   %s\n", a.Backend)
 	fmt.Printf("Thread:    %s\n", a.ThreadID)
 	if a.ParentJob != "" {
@@ -466,8 +466,6 @@ func cmdResultShow(args []string) {
 	}
 	fmt.Printf("Created:   %s\n", a.Created.Format(time.RFC3339))
 	fmt.Printf("Task:      %s\n", a.Task)
-	fmt.Println("---")
-	fmt.Println(a.Result)
 }
 
 func cmdResultSearch(args []string) {
@@ -479,12 +477,12 @@ func cmdResultSearch(args []string) {
 	artifacts := store.ListArtifacts()
 	found := false
 	for _, a := range artifacts {
-		if strings.Contains(strings.ToLower(a.Task), query) || strings.Contains(strings.ToLower(a.Result), query) {
+		if strings.Contains(strings.ToLower(a.Task), query) {
 			task := a.Task
 			if len(task) > 80 {
 				task = task[:80] + "..."
 			}
-			fmt.Printf("%s  %-10s  %-8s  %s  %s\n", a.ID, a.Source, a.Backend, a.Created.Format("2006-01-02 15:04"), task)
+			fmt.Printf("%s  %-8s  %s  %s\n", a.ID, a.Backend, a.Created.Format("2006-01-02 15:04"), task)
 			found = true
 		}
 	}
