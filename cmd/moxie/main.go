@@ -1160,7 +1160,7 @@ func startSubagentWatcher(ctx context.Context, cfg store.Config, backends map[st
 func runSubagentJobs(st subagentTransports) {
 	jobs := store.ListJobs()
 	for _, job := range jobs {
-		if job.Source != "subagent" || job.Status != "" {
+		if job.Source != "subagent" || (job.Status != "" && job.Status != "running" && job.Status != "ready") {
 			continue
 		}
 		job := job

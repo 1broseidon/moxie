@@ -333,12 +333,17 @@ func TestRecoverPendingJobsReplaysReadyJobAndAdvancesCursor(t *testing.T) {
 	}
 }
 
-func TestRetryDeliverableJobsProcessesReadyAndDeliveredOnly(t *testing.T) {
+func TestRetryDeliverableJobsProcessesReadyDeliveredAndRunning(t *testing.T) {
 	useTempStoreDir(t)
 
 	store.WriteJob(store.PendingJob{ID: "job-201", Status: "ready", ConversationID: "telegram:1", Result: "ready"})
 	store.WriteJob(store.PendingJob{ID: "job-202", Status: "delivered", ConversationID: "telegram:1", Result: "done"})
 	store.WriteJob(store.PendingJob{ID: "job-203", Status: "running", ConversationID: "telegram:1", Prompt: "still running"})
+
+	restoreRun := dispatch.SetRunModelFuncForTest(func(job *store.PendingJob, _ *oneagent.Client, _ func(string)) (string, bool) {
+		return "finished running", false
+	})
+	defer restoreRun()
 
 	var resultIDs []string
 	if !dispatch.RetryDeliverableJobs(nil, nil, func(job *store.PendingJob) dispatch.Callbacks {
@@ -352,14 +357,20 @@ func TestRetryDeliverableJobsProcessesReadyAndDeliveredOnly(t *testing.T) {
 		t.Fatal("expected RetryDeliverableJobs to report work")
 	}
 
-	if !reflect.DeepEqual(resultIDs, []string{"job-201"}) {
-		t.Fatalf("OnResult IDs = %v, want [job-201]", resultIDs)
+	var found201, found203 bool
+	for _, id := range resultIDs {
+		if id == "job-201" {
+			found201 = true
+		}
+		if id == "job-203" {
+			found203 = true
+		}
 	}
-	if store.JobExists("job-201") || store.JobExists("job-202") {
-		t.Fatal("expected ready and delivered jobs to be removed")
+	if len(resultIDs) != 2 || !found201 || !found203 {
+		t.Fatalf("OnResult IDs = %v, want [job-201, job-203] (any order)", resultIDs)
 	}
-	if !store.JobExists("job-203") {
-		t.Fatal("expected running job to remain")
+	if store.JobExists("job-201") || store.JobExists("job-202") || store.JobExists("job-203") {
+		t.Fatal("expected all retryable jobs to be removed after successful retry")
 	}
 }
 

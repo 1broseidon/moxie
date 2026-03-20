@@ -244,7 +244,7 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 }
 
 func isRetryable(job store.PendingJob) bool {
-	return job.Status == "ready" || job.Status == "delivered"
+	return job.Status == "ready" || job.Status == "delivered" || job.Status == "running"
 }
 
 func makeCallbacks(factory func(*store.PendingJob) Callbacks, job *store.PendingJob) Callbacks {
