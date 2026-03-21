@@ -74,7 +74,7 @@ To customize, create `~/.config/moxie/backends.json`. See [Backends](../guide/ba
 
 ## systemd service
 
-For always-on operation, create `~/.config/systemd/user/moxie-serve.service`:
+For always-on operation, create `~/.config/systemd/user/moxie-serve.service`, or let `moxie init` / `moxie service install` generate it:
 
 ```ini
 [Unit]
@@ -107,7 +107,7 @@ moxie service status
 
 ## launchd service
 
-For macOS, create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist` with a LaunchAgent label of `io.github.1broseidon.moxie` and an absolute `ProgramArguments` path to the `moxie` binary.
+For macOS, create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist`, or let `moxie init` / `moxie service install` generate it. The LaunchAgent label should be `io.github.1broseidon.moxie` and `ProgramArguments` should use an absolute path to the `moxie` binary.
 
 Recommended keys:
 

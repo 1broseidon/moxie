@@ -4,7 +4,7 @@
 
 ### `moxie init`
 
-Interactive setup for Telegram. Prompts for bot token and chat ID, writes `~/.config/moxie/config.json`.
+Interactive setup for Telegram. Prompts for bot token and chat ID, writes `~/.config/moxie/config.json`, and can optionally install/start the background service.
 
 ### `moxie serve`
 
@@ -102,6 +102,8 @@ moxie threads show <id>         # Show turns for a thread
 Control the background service.
 
 ```bash
+moxie service install [--cwd <dir>] [--transport <telegram|slack>]
+moxie service uninstall
 moxie service start
 moxie service stop
 moxie service restart

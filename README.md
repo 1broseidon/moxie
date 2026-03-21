@@ -25,11 +25,16 @@ The fastest way to get running:
 ```bash
 moxie init
 # Paste your bot token and chat ID when prompted
+# Optionally let init install and start the background service
+```
 
+4. **If you skipped service install during init, start Moxie manually:**
+
+```bash
 moxie serve
 ```
 
-4. **Send a message** to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
+5. **Send a message** to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
 
 That's it. Use `/model codex` or `/model gemini` in the chat to switch backends.
 
@@ -204,7 +209,7 @@ User overrides are merged on top of the embedded defaults. See the [oneagent doc
 
 ### systemd (Linux)
 
-Create `~/.config/systemd/user/moxie-serve.service`:
+Create `~/.config/systemd/user/moxie-serve.service` yourself, or let `moxie init` / `moxie service install` generate it for you.
 
 ```ini
 [Unit]
@@ -243,7 +248,7 @@ moxie service status
 
 ### launchd (macOS)
 
-Create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist`:
+Create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist` yourself, or let `moxie init` / `moxie service install` generate it for you:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -342,7 +347,7 @@ The primary agent can also delegate via the `moxie subagent` CLI tool during a c
 ## CLI reference
 
 ```
-moxie init                                          Configure bot token and chat ID
+moxie init                                          Configure chat credentials and optionally install/start the service
 moxie send [--transport <telegram|slack>] <message> Send a message
 moxie messages [--json|--raw] [-n N]                List recent messages
 moxie msg                                           Alias for messages
@@ -350,7 +355,7 @@ moxie schedule <add|list|show|rm>                   Manage schedules
 moxie subagent --backend <name> --text <task>       Delegate to a background agent
 moxie result <subcommand>                           Retrieve subagent results
 moxie threads show <id>                             Show thread turns
-moxie service <subcommand>                          Control the background service
+moxie service <subcommand>                          Install or control the background service
 moxie serve [--cwd <dir>] [--transport <t>]         Run chat transports
 ```
 

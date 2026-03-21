@@ -45,11 +45,15 @@ moxie init
 
 Paste your bot token and chat ID when prompted. This creates `~/.config/moxie/config.json`.
 
+Init can also offer to install and start Moxie as a background service for you.
+
 ### 4. Start the service
 
 ```bash
 moxie serve
 ```
+
+If you chose service install during `moxie init`, you can skip this step.
 
 Send a message to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
 

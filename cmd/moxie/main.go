@@ -94,6 +94,8 @@ func serviceUsage() {
 	fmt.Println(`moxie service — control the background service
 
 Usage:
+  moxie service install [--cwd <dir>] [--transport <telegram|slack>]
+  moxie service uninstall
   moxie service start
   moxie service stop
   moxie service restart
@@ -111,6 +113,10 @@ func cmdService() {
 		return
 	}
 	switch os.Args[2] {
+	case "install":
+		cmdServiceInstall(os.Args[3:])
+	case "uninstall":
+		cmdServiceUninstall()
 	case "start", "stop", "restart", "reload", "status":
 		cmdServiceControl(os.Args[2])
 	default:
@@ -263,16 +269,13 @@ func cmdInit() {
 		fatal("failed to create config dir: %v", err)
 	}
 
-	var token string
-	var chatID int64
+	reader := bufio.NewReader(os.Stdin)
 
-	fmt.Print("Bot token: ")
-	if _, err := fmt.Scanln(&token); err != nil {
-		fatal("failed to read bot token: %v", err)
-	}
-	fmt.Print("Chat ID: ")
-	if _, err := fmt.Scanln(&chatID); err != nil {
-		fatal("failed to read chat ID: %v", err)
+	token := promptRequiredLine(reader, "Bot token: ")
+	chatIDText := promptRequiredLine(reader, "Chat ID: ")
+	chatID, err := strconv.ParseInt(chatIDText, 10, 64)
+	if err != nil {
+		fatal("invalid chat ID: %s", chatIDText)
 	}
 
 	if token == "" {
@@ -295,6 +298,28 @@ func cmdInit() {
 	store.SaveConfig(cfg)
 	path := store.ConfigFile("config.json")
 	fmt.Printf("Config saved to %s\n", path)
+
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return
+	}
+	if !promptYesNo(reader, "Install and start as a background service? [y/N]: ", false) {
+		return
+	}
+
+	defaultCWD, err := os.Getwd()
+	if err != nil {
+		defaultCWD = ""
+	}
+	cwd := promptLine(reader, fmt.Sprintf("Service working directory [%s]: ", defaultCWD), defaultCWD)
+
+	opts := serviceInstallOptions{cwd: cwd}
+	path, err = installService(opts)
+	if err != nil {
+		fatal("service install failed: %v", err)
+	}
+	fmt.Printf("Service definition written to %s\n", path)
+	cmdServiceControl("start")
+	fmt.Println("Service started")
 }
 
 func cmdSend() {
