@@ -35,24 +35,6 @@ List recent messages. `moxie msg` is an alias.
 moxie messages [--json|--raw] [-n N]
 ```
 
-### `moxie poll`
-
-Show only new messages since the last poll and advance the cursor.
-
-```bash
-moxie poll [--json|--raw]
-```
-
-### `moxie cursor`
-
-Manage the Telegram update cursor.
-
-```bash
-moxie cursor                    # Show current position
-moxie cursor set <update_id>    # Set to specific position
-moxie cursor reset              # Reset to 0
-```
-
 ### `moxie schedule`
 
 Manage scheduled messages and dispatches.
@@ -113,4 +95,40 @@ View thread history.
 
 ```bash
 moxie threads show <id>         # Show turns for a thread
+```
+
+### `moxie start`, `stop`, `restart`, `reload`, `status`
+
+Control the user-level systemd service for Moxie.
+
+```bash
+moxie start
+moxie stop
+moxie restart
+moxie reload
+moxie status
+```
+
+`reload` sends `SIGHUP` to the running service so it can reload config and backend definitions without exiting the process.
+
+## Operator Commands
+
+These commands are mainly for Telegram transport troubleshooting and scripted intake tests. Most users should not need them during normal use.
+
+### `moxie poll`
+
+Show only new Telegram messages since the last poll and advance the stored update cursor.
+
+```bash
+moxie poll [--json|--raw]
+```
+
+### `moxie cursor`
+
+Inspect or modify the stored Telegram update cursor.
+
+```bash
+moxie cursor                    # Show current position
+moxie cursor set <update_id>    # Set to specific position
+moxie cursor reset              # Reset to 0
 ```

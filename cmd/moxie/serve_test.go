@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -112,6 +113,74 @@ func TestRunServeSupervisorFailsWhenAllTransportsFail(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected supervisor error when all transports fail")
+	}
+}
+
+func TestInstallServeSignalHandlerReloadsOnSIGHUP(t *testing.T) {
+	dispatch.SetShuttingDown(false)
+	t.Cleanup(func() { dispatch.SetShuttingDown(false) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actionCh, stop := installServeSignalHandler(cancel)
+	defer stop()
+
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess(): %v", err)
+	}
+	if err := p.Signal(syscall.SIGHUP); err != nil {
+		t.Fatalf("Signal(SIGHUP): %v", err)
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("context was not canceled on reload signal")
+	}
+
+	select {
+	case got := <-actionCh:
+		if got != serveSignalReload {
+			t.Fatalf("signal action = %v, want reload", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload action not delivered")
+	}
+}
+
+func TestInstallServeSignalHandlerStopsOnSIGTERM(t *testing.T) {
+	dispatch.SetShuttingDown(false)
+	t.Cleanup(func() { dispatch.SetShuttingDown(false) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	actionCh, stop := installServeSignalHandler(cancel)
+	defer stop()
+
+	p, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess(): %v", err)
+	}
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("Signal(SIGTERM): %v", err)
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("context was not canceled on stop signal")
+	}
+
+	select {
+	case got := <-actionCh:
+		if got != serveSignalStop {
+			t.Fatalf("signal action = %v, want stop", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop action not delivered")
 	}
 }
 

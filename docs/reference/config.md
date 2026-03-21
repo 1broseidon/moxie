@@ -82,6 +82,7 @@ Description=Moxie chat agent
 
 [Service]
 ExecStart=%h/go/bin/moxie serve --cwd %h/projects/default
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 
@@ -92,4 +93,14 @@ WantedBy=default.target
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now moxie-serve
+```
+
+For day-to-day control you can also use:
+
+```bash
+moxie start
+moxie stop
+moxie restart
+moxie reload
+moxie status
 ```

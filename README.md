@@ -212,6 +212,7 @@ Description=Moxie chat agent
 
 [Service]
 ExecStart=%h/go/bin/moxie serve --cwd %h/projects/default
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
 
@@ -228,6 +229,16 @@ Check status:
 
 ```bash
 systemctl --user status moxie-serve
+```
+
+Or use the built-in wrappers:
+
+```bash
+moxie start
+moxie stop
+moxie restart
+moxie reload
+moxie status
 ```
 
 ### serve flags
@@ -291,12 +302,12 @@ moxie init                                          Configure bot token and chat
 moxie send [--transport <telegram|slack>] <message> Send a message
 moxie messages [--json|--raw] [-n N]                List recent messages
 moxie msg                                           Alias for messages
-moxie poll [--json|--raw]                           Show new messages since last poll
-moxie cursor [set <id> | reset]                     Manage poll cursor
 moxie schedule <add|list|show|rm>                   Manage schedules
 moxie subagent --backend <name> --text <task>       Delegate to a background agent
 moxie result <subcommand>                           Retrieve subagent results
 moxie threads show <id>                             Show thread turns
+moxie start|stop|restart|reload                     Control the user service
+moxie status                                        Show user service status
 moxie serve [--cwd <dir>] [--transport <t>]         Run chat transports
 ```
 

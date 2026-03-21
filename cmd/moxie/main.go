@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -32,40 +33,42 @@ func fatal(format string, args ...any) {
 
 // --- CLI entrypoint ---
 
+var commandHandlers = map[string]func(){
+	"init":     cmdInit,
+	"send":     cmdSend,
+	"messages": cmdMessages,
+	"msg":      cmdMessages,
+	"poll":     cmdPoll,
+	"cursor":   cmdCursor,
+	"schedule": cmdSchedule,
+	"subagent": cmdSubagent,
+	"result":   cmdResult,
+	"threads":  cmdThreads,
+	"start":    func() { cmdServiceControl("start") },
+	"stop":     func() { cmdServiceControl("stop") },
+	"restart":  func() { cmdServiceControl("restart") },
+	"reload":   func() { cmdServiceControl("reload") },
+	"status":   func() { cmdServiceControl("status") },
+	"serve":    cmdServe,
+	"help":     usage,
+	"--help":   usage,
+	"-h":       usage,
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(1)
 	}
 
-	switch os.Args[1] {
-	case "init":
-		cmdInit()
-	case "send":
-		cmdSend()
-	case "messages", "msg":
-		cmdMessages()
-	case "poll":
-		cmdPoll()
-	case "cursor":
-		cmdCursor()
-	case "schedule":
-		cmdSchedule()
-	case "subagent":
-		cmdSubagent()
-	case "result":
-		cmdResult()
-	case "threads":
-		cmdThreads()
-	case "serve":
-		cmdServe()
-	case "help", "--help", "-h":
-		usage()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
-		usage()
-		os.Exit(1)
+	if handler, ok := commandHandlers[os.Args[1]]; ok {
+		handler()
+		return
 	}
+
+	fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+	usage()
+	os.Exit(1)
 }
 
 func usage() {
@@ -76,15 +79,25 @@ Usage:
   moxie send <message>                    Send a message
   moxie messages [--json|--raw] [-n N]    List recent messages (default: markdown)
   moxie msg                               Alias for messages
-  moxie poll [--json|--raw]               Show only NEW messages since last poll, advance cursor
-  moxie cursor                            Show current cursor position
-  moxie cursor set <update_id>            Manually set cursor
-  moxie cursor reset                      Reset cursor to 0
   moxie schedule <subcommand>             Manage schedules
   moxie subagent --backend <name> --text <task>  Delegate work to a background agent
   moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
+  moxie start|stop|restart|reload         Control the user service (systemd)
+  moxie status                            Show user service status (systemd)
   moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run configured chat transports and dispatch to agent backends`)
+}
+
+const defaultServiceUnit = "moxie-serve.service"
+
+func cmdServiceControl(action string) {
+	cmd := exec.Command("systemctl", "--user", action, defaultServiceUnit)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		fatal("systemctl --user %s %s failed: %v", action, defaultServiceUnit, err)
+	}
 }
 
 func cmdInit() {
@@ -1368,6 +1381,14 @@ type serveTransportResult struct {
 	err  error
 }
 
+type serveSignalAction int
+
+const (
+	serveSignalNone serveSignalAction = iota
+	serveSignalStop
+	serveSignalReload
+)
+
 func runServeSupervisor(ctx context.Context, transports []serveTransportRuntime) error {
 	if len(transports) == 0 {
 		return fmt.Errorf("no serve transports configured")
@@ -1405,38 +1426,57 @@ func runServeSupervisor(ctx context.Context, transports []serveTransportRuntime)
 }
 
 func cmdServe() {
-	cfg, err := store.LoadConfig()
-	if err != nil {
-		fatal("%v", err)
-	}
-
 	flags := parseServeTransportAndCWD()
 	defaultCWD := flags.cwd
 	if defaultCWD != "" {
+		var err error
 		defaultCWD, err = resolveDir(defaultCWD)
 		if err != nil {
 			fatal("invalid --cwd: %v", err)
 		}
 	}
 
+	for {
+		action, err := runServeOnce(flags.transport, defaultCWD)
+		if action == serveSignalReload {
+			if err != nil {
+				log.Printf("reload completed after transport stop: %v", err)
+			}
+			log.Println("reload requested; reloading config and restarting transports")
+			continue
+		}
+		if err != nil {
+			fatal("%v", err)
+		}
+		return
+	}
+}
+
+func runServeOnce(requestedTransport, defaultCWD string) (serveSignalAction, error) {
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		return serveSignalNone, err
+	}
+
 	backends, err := loadServeBackends()
 	if err != nil {
-		fatal("no backends: %v", err)
+		return serveSignalNone, fmt.Errorf("no backends: %w", err)
 	}
 
 	schedules := newScheduleStore()
 	if err := schedules.Repair(store.JobExists); err != nil {
 		log.Printf("schedule repair failed: %v", err)
 	}
-	transports, err := chooseServeTransports(cfg, flags.transport)
+	transports, err := chooseServeTransports(cfg, requestedTransport)
 	if err != nil {
-		fatal("%v", err)
+		return serveSignalNone, err
 	}
 
 	dispatch.SetShuttingDown(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	installSignalHandlerWithCancel(cancel)
+	actionCh, stopSignals := installServeSignalHandler(cancel)
+	defer stopSignals()
 
 	runtimes := make([]serveTransportRuntime, 0, len(transports))
 	for _, transport := range transports {
@@ -1464,9 +1504,8 @@ func cmdServe() {
 
 	startSubagentWatcher(ctx, cfg, backends, schedules)
 
-	if err := runServeSupervisor(ctx, runtimes); err != nil {
-		fatal("%v", err)
-	}
+	err = runServeSupervisor(ctx, runtimes)
+	return serveSignalActionFromChannel(actionCh), err
 }
 
 func loadServeBackends() (map[string]oneagent.Backend, error) {
@@ -1476,17 +1515,47 @@ func loadServeBackends() (map[string]oneagent.Backend, error) {
 	})
 }
 
-func installSignalHandlerWithCancel(cancel func()) {
+func installServeSignalHandler(cancel func()) (<-chan serveSignalAction, func()) {
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	actions := make(chan serveSignalAction, 1)
+	stop := make(chan struct{})
 	go func() {
-		<-sig
-		dispatch.SetShuttingDown(true)
-		if cancel != nil {
-			cancel()
+		defer close(actions)
+		select {
+		case s := <-sig:
+			dispatch.SetShuttingDown(true)
+			if cancel != nil {
+				cancel()
+			}
+			switch s {
+			case syscall.SIGHUP:
+				log.Println("reload requested; draining current work")
+				actions <- serveSignalReload
+			default:
+				log.Println("shutdown requested; draining current work")
+				actions <- serveSignalStop
+			}
+		case <-stop:
+			return
 		}
-		log.Println("shutdown requested; draining current work")
 	}()
+	return actions, func() {
+		signal.Stop(sig)
+		close(stop)
+	}
+}
+
+func serveSignalActionFromChannel(actionCh <-chan serveSignalAction) serveSignalAction {
+	select {
+	case action, ok := <-actionCh:
+		if !ok {
+			return serveSignalNone
+		}
+		return action
+	default:
+		return serveSignalNone
+	}
 }
 
 func runTelegramTransport(ctx context.Context, cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) error {
