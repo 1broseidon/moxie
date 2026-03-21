@@ -98,9 +98,9 @@ systemctl --user enable --now moxie-serve
 For day-to-day control you can also use:
 
 ```bash
-moxie start
-moxie stop
-moxie restart
-moxie reload
-moxie status
+moxie service start
+moxie service stop
+moxie service restart
+moxie service reload
+moxie service status
 ```

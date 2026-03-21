@@ -234,11 +234,11 @@ systemctl --user status moxie-serve
 Or use the built-in wrappers:
 
 ```bash
-moxie start
-moxie stop
-moxie restart
-moxie reload
-moxie status
+moxie service start
+moxie service stop
+moxie service restart
+moxie service reload
+moxie service status
 ```
 
 ### serve flags
@@ -306,8 +306,7 @@ moxie schedule <add|list|show|rm>                   Manage schedules
 moxie subagent --backend <name> --text <task>       Delegate to a background agent
 moxie result <subcommand>                           Retrieve subagent results
 moxie threads show <id>                             Show thread turns
-moxie start|stop|restart|reload                     Control the user service
-moxie status                                        Show user service status
+moxie service <subcommand>                          Control the background service
 moxie serve [--cwd <dir>] [--transport <t>]         Run chat transports
 ```
 

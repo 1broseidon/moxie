@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -44,11 +45,7 @@ var commandHandlers = map[string]func(){
 	"subagent": cmdSubagent,
 	"result":   cmdResult,
 	"threads":  cmdThreads,
-	"start":    func() { cmdServiceControl("start") },
-	"stop":     func() { cmdServiceControl("stop") },
-	"restart":  func() { cmdServiceControl("restart") },
-	"reload":   func() { cmdServiceControl("reload") },
-	"status":   func() { cmdServiceControl("status") },
+	"service":  cmdService,
 	"serve":    cmdServe,
 	"help":     usage,
 	"--help":   usage,
@@ -83,14 +80,44 @@ Usage:
   moxie subagent --backend <name> --text <task>  Delegate work to a background agent
   moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
-  moxie start|stop|restart|reload         Control the user service (systemd)
-  moxie status                            Show user service status (systemd)
+  moxie service <subcommand>              Control the background service
   moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run configured chat transports and dispatch to agent backends`)
 }
 
 const defaultServiceUnit = "moxie-serve.service"
 
+func serviceUsage() {
+	fmt.Println(`moxie service — control the background service
+
+Usage:
+  moxie service start
+  moxie service stop
+  moxie service restart
+  moxie service reload
+  moxie service status
+
+Notes:
+  Linux uses systemd user services
+  macOS service control is not implemented yet; use launchd directly or run moxie serve in the foreground`)
+}
+
+func cmdService() {
+	if len(os.Args) < 3 {
+		serviceUsage()
+		return
+	}
+	switch os.Args[2] {
+	case "start", "stop", "restart", "reload", "status":
+		cmdServiceControl(os.Args[2])
+	default:
+		serviceUsage()
+	}
+}
+
 func cmdServiceControl(action string) {
+	if runtime.GOOS != "linux" {
+		fatal("moxie service %s is not implemented for %s yet; use the platform service manager directly", action, runtime.GOOS)
+	}
 	cmd := exec.Command("systemctl", "--user", action, defaultServiceUnit)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

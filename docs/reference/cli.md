@@ -97,19 +97,19 @@ View thread history.
 moxie threads show <id>         # Show turns for a thread
 ```
 
-### `moxie start`, `stop`, `restart`, `reload`, `status`
+### `moxie service`
 
-Control the user-level systemd service for Moxie.
+Control the background service.
 
 ```bash
-moxie start
-moxie stop
-moxie restart
-moxie reload
-moxie status
+moxie service start
+moxie service stop
+moxie service restart
+moxie service reload
+moxie service status
 ```
 
-`reload` sends `SIGHUP` to the running service so it can reload config and backend definitions without exiting the process.
+On Linux, `reload` sends `SIGHUP` to the running service so it can reload config and backend definitions without exiting the process.
 
 ## Operator Commands
 
