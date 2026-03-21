@@ -2,6 +2,13 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.3] - 2026-03-21
+
+### Changed
+
+- Service lifecycle commands now live under `moxie service ...` instead of top-level `moxie start|stop|restart|reload|status`
+- Non-Linux platforms now get a clear service-manager error instead of attempting to invoke `systemctl`
+
 ## [0.1.2] - 2026-03-21
 
 ### Added
