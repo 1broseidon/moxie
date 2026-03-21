@@ -6,7 +6,7 @@ Commands available in Telegram and Slack conversations. All commands start with 
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a new conversation thread |
+| `/new [backend] [workspace]` | Start a new conversation thread |
 | `/model [backend] [model]` | Show or switch the agent backend |
 | `/think [off\|low\|medium\|high]` | Show or set thinking/reasoning effort |
 | `/cwd [name\|path]` | Show or switch working directory |
@@ -15,11 +15,13 @@ Commands available in Telegram and Slack conversations. All commands start with 
 
 ## `/new`
 
-Start a fresh conversation thread. The backend and model stay the same.
+Start a fresh conversation thread with an auto-generated name. You can optionally pass a backend or workspace name to switch them at the same time.
 
 ```
-/new                    → new thread with auto-generated name
-/new auth-refactor      → new thread named "auth-refactor"
+/new                    → new thread, current backend and cwd stay the same
+/new codex              → new thread, switch backend to Codex
+/new myapp              → new thread, switch working directory to 'myapp' workspace
+/new codex myapp        → new thread, switch both
 ```
 
 ## `/model`

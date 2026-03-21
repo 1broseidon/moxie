@@ -35,7 +35,7 @@ The primary agent can also delegate work by calling `moxie subagent` as a shell 
 ## Retrieving results
 
 ```bash
-moxie result list              # List completed subagent results
+moxie result list [--limit <n>]  # List completed subagent results
 moxie result show <id>         # Show a specific result artifact
 moxie result search <query>    # Search artifacts by task text
 ```

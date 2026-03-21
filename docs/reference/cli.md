@@ -102,7 +102,7 @@ moxie subagent --backend <name> --text <task> [flags]
 Retrieve subagent results.
 
 ```bash
-moxie result list               # List completed results
+moxie result list [--limit <n>] # List completed results
 moxie result show <id>          # Show a specific result artifact
 moxie result search <query>     # Search result artifacts by task text
 ```

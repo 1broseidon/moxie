@@ -247,7 +247,7 @@ Commands available in Telegram and Slack:
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Start a new conversation thread |
+| `/new [backend] [workspace]` | Start a new conversation thread |
 | `/model [backend] [model]` | Show or switch the agent backend |
 | `/think [off\|low\|medium\|high]` | Show or set thinking/reasoning effort |
 | `/cwd [name\|path]` | Show or switch working directory |
