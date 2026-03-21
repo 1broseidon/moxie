@@ -2,6 +2,17 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.6] - 2026-03-21
+
+### Added
+
+- `moxie service install` and `moxie service uninstall` for native service definition management
+- Optional service install/start flow during `moxie init`
+
+### Changed
+
+- `moxie init` can now collect a default service working directory when installing a background service
+
 ## [0.1.5] - 2026-03-21
 
 ### Fixed
