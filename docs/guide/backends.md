@@ -80,7 +80,7 @@ Then switch by name: `/cwd myapp`
 
 ## Custom backend config
 
-oneagent ships with embedded defaults for all supported backends. To override settings or add new backends, create `~/.config/oneagent/backends.json`:
+Moxie loads oneagent's embedded defaults for all supported backends and applies overrides from `~/.config/moxie/backends.json`. To override settings or add new backends, create:
 
 ```json
 {

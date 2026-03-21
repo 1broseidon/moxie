@@ -71,14 +71,17 @@ moxie schedule rm <id>        # Delete a schedule
 
 ## Dispatch context
 
-When a schedule uses `--action dispatch`, it captures the current backend, model, thread, and working directory at creation time. You can override these:
+When a schedule uses `--action dispatch`, it captures the current backend, model, thread, and working directory at creation time. You can override these with `--backend`, `--model`, `--thread`, and `--cwd`:
 
 ```bash
 moxie schedule add \
   --transport telegram \
   --action dispatch \
+  --backend codex \
+  --model gpt-5 \
+  --cwd /home/user/projects/myapp \
   --cron "0 9 * * 1" \
   --text "Weekly code review summary"
 ```
 
-The dispatch runs against whatever backend the conversation was using when the schedule was created.
+Without overrides, the dispatch runs against whatever backend the conversation was using when the schedule was created.

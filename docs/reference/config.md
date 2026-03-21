@@ -68,9 +68,9 @@ State is managed through [chat commands](../guide/commands) and persists across 
 
 ## Backend configuration
 
-Agent backends are configured through [oneagent](https://github.com/1broseidon/oneagent), not Moxie directly. Embedded defaults ship for Claude, Codex, Gemini, Pi, and OpenCode.
+Agent backends use the [oneagent](https://github.com/1broseidon/oneagent) schema, but Moxie loads embedded defaults itself and applies overrides from `~/.config/moxie/backends.json`.
 
-To customize, create `~/.config/oneagent/backends.json` with overrides. See [Backends](../guide/backends) for details.
+To customize, create `~/.config/moxie/backends.json`. See [Backends](../guide/backends) for details.
 
 ## systemd service
 

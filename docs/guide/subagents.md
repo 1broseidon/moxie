@@ -23,9 +23,10 @@ moxie subagent \
 |------|-------------|
 | `--backend` | Required. Target backend for the delegated task |
 | `--text` | Required. The task prompt |
+| `--context-budget` | Optional. Context budget for compiled parent context |
 | `--model` | Optional. Model override for the target backend |
-| `--cwd` | Optional. Working directory (defaults to current) |
-| `--thread` | Optional. Thread ID for the subagent |
+| `--cwd` | Optional. Working directory override |
+| `--parent-job` | Optional. Explicit parent dispatch job to attach to |
 
 ## Agent-initiated delegation
 
@@ -35,7 +36,8 @@ The primary agent can also delegate work by calling `moxie subagent` as a shell 
 
 ```bash
 moxie result list              # List completed subagent results
-moxie result show <id>         # Show a specific result
+moxie result show <id>         # Show a specific result artifact
+moxie result search <query>    # Search artifacts by task text
 ```
 
 ## Depth limits

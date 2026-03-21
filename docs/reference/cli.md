@@ -21,15 +21,15 @@ moxie serve [--cwd <dir>] [--transport <telegram|slack>]
 
 ### `moxie send`
 
-Send a message directly (Telegram only).
+Send a message directly to the configured transport. If both transports are configured, use `--transport telegram` or `--transport slack`.
 
 ```bash
-moxie send <message>
+moxie send [--transport <telegram|slack>] <message>
 ```
 
 ### `moxie messages`
 
-List recent messages.
+List recent messages. `moxie msg` is an alias.
 
 ```bash
 moxie messages [--json|--raw] [-n N]
@@ -75,6 +75,10 @@ moxie schedule rm <id>          # Delete a schedule
 | `--at` | Absolute time (RFC 3339) |
 | `--cron` | Cron expression |
 | `--text` | Message or prompt text |
+| `--backend` | Override backend for `dispatch` schedules |
+| `--model` | Override model for `dispatch` schedules |
+| `--thread` | Override thread for `dispatch` schedules |
+| `--cwd` | Override working directory for `dispatch` schedules |
 
 ### `moxie subagent`
 
@@ -88,9 +92,10 @@ moxie subagent --backend <name> --text <task> [flags]
 |------|-------------|
 | `--backend` | Required. Target backend |
 | `--text` | Required. Task prompt |
+| `--context-budget` | Context budget for compiled parent context |
 | `--model` | Model override |
-| `--cwd` | Working directory |
-| `--thread` | Thread ID |
+| `--cwd` | Working directory override |
+| `--parent-job` | Explicit parent dispatch job to attach to |
 
 ### `moxie result`
 
@@ -98,7 +103,8 @@ Retrieve subagent results.
 
 ```bash
 moxie result list               # List completed results
-moxie result show <id>          # Show a specific result
+moxie result show <id>          # Show a specific result artifact
+moxie result search <query>     # Search result artifacts by task text
 ```
 
 ### `moxie threads`

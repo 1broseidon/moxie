@@ -143,7 +143,7 @@ Then in chat: `/cwd myapp` switches the agent to that directory.
 
 ## Agent backends
 
-Moxie dispatches to whatever agent CLIs you have installed. Backend configuration is managed by [oneagent](https://github.com/1broseidon/oneagent) and shared across all tools that use it.
+Moxie dispatches to whatever agent CLIs you have installed. Backend definitions use the [oneagent](https://github.com/1broseidon/oneagent) schema, with embedded defaults plus Moxie-specific overrides in `~/.config/moxie/backends.json`.
 
 ### Supported backends
 
@@ -188,7 +188,7 @@ For backends that support reasoning effort (Claude, Codex, Pi):
 
 ### Custom backend config
 
-oneagent loads embedded defaults for all supported backends. To override or add backends, create `~/.config/oneagent/backends.json`:
+Moxie loads oneagent's embedded backend defaults and applies overrides from `~/.config/moxie/backends.json`. To override or add backends, create:
 
 ```json
 {
@@ -288,8 +288,9 @@ The primary agent can also delegate via the `moxie subagent` CLI tool during a c
 
 ```
 moxie init                                          Configure bot token and chat ID
-moxie send <message>                                Send a message
+moxie send [--transport <telegram|slack>] <message> Send a message
 moxie messages [--json|--raw] [-n N]                List recent messages
+moxie msg                                           Alias for messages
 moxie poll [--json|--raw]                           Show new messages since last poll
 moxie cursor [set <id> | reset]                     Manage poll cursor
 moxie schedule <add|list|show|rm>                   Manage schedules
