@@ -111,6 +111,8 @@ moxie service status
 
 On Linux, `reload` sends `SIGHUP` to the running service so it can reload config and backend definitions without exiting the process.
 
+On macOS, `moxie service` manages the LaunchAgent `io.github.1broseidon.moxie` at `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist`.
+
 ## Operator Commands
 
 These commands are mainly for Telegram transport troubleshooting and scripted intake tests. Most users should not need them during normal use.

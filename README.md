@@ -241,6 +241,50 @@ moxie service reload
 moxie service status
 ```
 
+### launchd (macOS)
+
+Create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.1broseidon.moxie</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/moxie</string>
+    <string>serve</string>
+    <string>--cwd</string>
+    <string>/Users/you/projects/default</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/you/projects/default</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/you/Library/Logs/moxie.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/Library/Logs/moxie.log</string>
+</dict>
+</plist>
+```
+
+Replace the binary path with your actual `moxie` install path.
+
+Then use:
+
+```bash
+moxie service start
+moxie service stop
+moxie service restart
+moxie service reload
+moxie service status
+```
+
 ### serve flags
 
 ```

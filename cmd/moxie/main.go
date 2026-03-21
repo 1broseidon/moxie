@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -85,6 +86,7 @@ Usage:
 }
 
 const defaultServiceUnit = "moxie-serve.service"
+const defaultLaunchdLabel = "io.github.1broseidon.moxie"
 
 func serviceUsage() {
 	fmt.Println(`moxie service — control the background service
@@ -98,7 +100,7 @@ Usage:
 
 Notes:
   Linux uses systemd user services
-  macOS service control is not implemented yet; use launchd directly or run moxie serve in the foreground`)
+  macOS uses launchd with ~/Library/LaunchAgents/io.github.1broseidon.moxie.plist`)
 }
 
 func cmdService() {
@@ -115,9 +117,17 @@ func cmdService() {
 }
 
 func cmdServiceControl(action string) {
-	if runtime.GOOS != "linux" {
+	switch runtime.GOOS {
+	case "linux":
+		runSystemdUserAction(action)
+	case "darwin":
+		runLaunchdUserAction(action)
+	default:
 		fatal("moxie service %s is not implemented for %s yet; use the platform service manager directly", action, runtime.GOOS)
 	}
+}
+
+func runSystemdUserAction(action string) {
 	cmd := exec.Command("systemctl", "--user", action, defaultServiceUnit)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -125,6 +135,120 @@ func cmdServiceControl(action string) {
 	if err := cmd.Run(); err != nil {
 		fatal("systemctl --user %s %s failed: %v", action, defaultServiceUnit, err)
 	}
+}
+
+func runLaunchdUserAction(action string) {
+	plist := launchdPlistPath()
+	target := launchdServiceTarget(os.Getuid())
+	domain := launchdDomainTarget(os.Getuid())
+
+	switch action {
+	case "start":
+		requireLaunchdPlist(plist)
+		if launchdServiceLoaded(target) {
+			runLaunchctl("kickstart", target)
+			return
+		}
+		runLaunchctl("bootstrap", domain, plist)
+	case "stop":
+		requireLaunchdPlist(plist)
+		runLaunchctl("bootout", domain, plist)
+	case "restart":
+		requireLaunchdPlist(plist)
+		if launchdServiceLoaded(target) {
+			runLaunchctl("kickstart", "-k", target)
+			return
+		}
+		runLaunchctl("bootstrap", domain, plist)
+	case "reload":
+		pid, err := launchdServicePID(target)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+			fatal("failed to signal %s (pid %d): %v", target, pid, err)
+		}
+	case "status":
+		runLaunchctl("print", target)
+	default:
+		fatal("unsupported service action: %s", action)
+	}
+}
+
+func launchdPlistPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fatal("resolve home dir: %v", err)
+	}
+	return filepath.Join(home, "Library", "LaunchAgents", defaultLaunchdLabel+".plist")
+}
+
+func launchdDomainTarget(uid int) string {
+	return fmt.Sprintf("gui/%d", uid)
+}
+
+func launchdServiceTarget(uid int) string {
+	return launchdDomainTarget(uid) + "/" + defaultLaunchdLabel
+}
+
+func requireLaunchdPlist(path string) {
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	fatal("launchd plist not found: %s\nCreate a LaunchAgent at that path, then rerun moxie service", path)
+}
+
+func runLaunchctl(args ...string) {
+	cmd := exec.Command("launchctl", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		fatal("launchctl %s failed: %v", strings.Join(args, " "), err)
+	}
+}
+
+func launchdServiceLoaded(target string) bool {
+	cmd := exec.Command("launchctl", "print", target)
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	return true
+}
+
+func launchdServicePID(target string) (int, error) {
+	out, err := exec.Command("launchctl", "print", target).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return 0, fmt.Errorf("launchctl print %s failed: %s", target, msg)
+		}
+		return 0, fmt.Errorf("launchctl print %s failed: %w", target, err)
+	}
+	pid, ok := parseLaunchdPID(string(out))
+	if !ok {
+		return 0, fmt.Errorf("could not determine pid for %s", target)
+	}
+	return pid, nil
+}
+
+func parseLaunchdPID(output string) (int, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "pid = ") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "pid = "))
+		if len(fields) == 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err == nil && pid > 0 {
+			return pid, true
+		}
+	}
+	return 0, false
 }
 
 func cmdInit() {

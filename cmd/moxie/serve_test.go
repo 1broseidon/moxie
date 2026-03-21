@@ -184,6 +184,30 @@ func TestInstallServeSignalHandlerStopsOnSIGTERM(t *testing.T) {
 	}
 }
 
+func TestLaunchdTargets(t *testing.T) {
+	if got := launchdDomainTarget(501); got != "gui/501" {
+		t.Fatalf("launchdDomainTarget() = %q, want gui/501", got)
+	}
+	if got := launchdServiceTarget(501); got != "gui/501/"+defaultLaunchdLabel {
+		t.Fatalf("launchdServiceTarget() = %q", got)
+	}
+}
+
+func TestParseLaunchdPID(t *testing.T) {
+	out := `
+gui/501/io.github.1broseidon.moxie = {
+	pid = 12345
+	last exit code = 0
+}`
+	pid, ok := parseLaunchdPID(out)
+	if !ok {
+		t.Fatal("parseLaunchdPID() ok = false, want true")
+	}
+	if pid != 12345 {
+		t.Fatalf("parseLaunchdPID() = %d, want 12345", pid)
+	}
+}
+
 func TestDispatchSynthesisPreservesParentStateAndReplyConversation(t *testing.T) {
 	restoreStore := store.SetConfigDir(t.TempDir())
 	t.Cleanup(restoreStore)

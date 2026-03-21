@@ -104,3 +104,26 @@ moxie service restart
 moxie service reload
 moxie service status
 ```
+
+## launchd service
+
+For macOS, create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist` with a LaunchAgent label of `io.github.1broseidon.moxie` and an absolute `ProgramArguments` path to the `moxie` binary.
+
+Recommended keys:
+
+- `ProgramArguments`
+- `WorkingDirectory`
+- `RunAtLoad`
+- `KeepAlive`
+- `StandardOutPath`
+- `StandardErrorPath`
+
+Once the plist exists, use:
+
+```bash
+moxie service start
+moxie service stop
+moxie service restart
+moxie service reload
+moxie service status
+```
