@@ -261,20 +261,7 @@ func SendChunked(bot sender, conversation chat.ConversationRef, text string) err
 		return err
 	}
 
-	for len(text) > 0 {
-		chunk := text
-		if len(chunk) > 4000 {
-			cut := strings.LastIndex(chunk[:4000], "\n")
-			if cut <= 0 {
-				cut = 4000
-			}
-			chunk = text[:cut]
-			text = text[cut:]
-		} else {
-			text = ""
-		}
-		text = strings.TrimPrefix(text, "\n")
-
+	for _, chunk := range chat.SplitText(text, 4000) {
 		if _, err := bot.Send(tb.ChatID(chatID), chunk, tb.ModeHTML); err != nil {
 			log.Printf("send error: %v", err)
 			if !strings.Contains(strings.ToLower(err.Error()), "can't parse entities") {
@@ -487,6 +474,14 @@ func IsPhotoPath(path string) bool {
 	}
 }
 
+func emptyResultMessage(backend string) string {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		return "Backend returned an empty response."
+	}
+	return fmt.Sprintf("Backend %s returned an empty response.", backend)
+}
+
 func DeliverJobResult(bot sender, job *PendingJob) error {
 	paths, text := SplitResponseFiles(job.Result)
 	conversation := conversationFromID(job.ConversationID)
@@ -499,10 +494,7 @@ func DeliverJobResult(bot sender, job *PendingJob) error {
 		}
 	}
 	if text == "" && len(paths) == 0 {
-		text = "Done — nothing to report."
-	}
-	if text == "" {
-		return nil
+		text = emptyResultMessage(job.State.Backend)
 	}
 	return SendChunked(bot, conversation, text)
 }

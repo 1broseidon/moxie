@@ -172,6 +172,7 @@ type State struct {
 	Model    string `json:"model,omitempty"`
 	ThreadID string `json:"thread_id,omitempty"`
 	CWD      string `json:"cwd,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
 }
 
 type stateFile struct {

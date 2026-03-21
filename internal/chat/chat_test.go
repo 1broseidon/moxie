@@ -160,3 +160,91 @@ func TestHandleInboundCWDChangeClearsNativeSession(t *testing.T) {
 		t.Fatalf("conversation cwd = %q, want %q", state.CWD, workspaceDir)
 	}
 }
+
+func TestHandleInboundBackendSwitchClearsTargetNativeSession(t *testing.T) {
+	useTempConfigDir(t)
+
+	threadDir := t.TempDir()
+	client := &oneagent.Client{
+		Backends: map[string]oneagent.Backend{
+			"codex": {},
+			"pi":    {},
+		},
+		Store: oneagent.FilesystemStore{Dir: threadDir},
+	}
+	if err := client.SaveThread(&oneagent.Thread{
+		ID: "chat-1",
+		NativeSessions: map[string]string{
+			"codex": "codex-live",
+			"pi":    "pi-stale",
+		},
+	}); err != nil {
+		t.Fatalf("SaveThread(): %v", err)
+	}
+
+	conversation := ConversationRef{Provider: ProviderTelegram, ChannelID: "412407481"}
+	store.WriteConversationState(conversation.ID(), store.State{
+		Backend:  "codex",
+		ThreadID: "chat-1",
+	})
+
+	got := HandleInbound(
+		InboundMessage{
+			Source:       "telegram",
+			Conversation: conversation,
+			Text:         "/model pi",
+		},
+		Settings{Workspaces: map[string]string{}},
+		"",
+		store.ReadConversationState(conversation.ID()),
+		client,
+	)
+	if got.ImmediateReply != "Switched to pi" {
+		t.Fatalf("ImmediateReply = %q, want switched backend reply", got.ImmediateReply)
+	}
+
+	thread, err := client.LoadThread("chat-1")
+	if err != nil {
+		t.Fatalf("LoadThread(): %v", err)
+	}
+	if _, ok := thread.NativeSessions["pi"]; ok {
+		t.Fatalf("native session = %+v, want stale pi session removed", thread.NativeSessions)
+	}
+	if got := thread.NativeSessions["codex"]; got != "codex-live" {
+		t.Fatalf("codex session = %q, want codex-live", got)
+	}
+
+	state := store.ReadConversationState(conversation.ID())
+	if state.Backend != "pi" {
+		t.Fatalf("conversation backend = %q, want pi", state.Backend)
+	}
+}
+
+func TestSplitText(t *testing.T) {
+	tests := []struct {
+		name  string
+		text  string
+		limit int
+		want  []string
+	}{
+		{"short", "hello", 100, []string{"hello"}},
+		{"exact", "hello", 5, []string{"hello"}},
+		{"paragraph split", "aaa\n\nbbb\n\nccc", 10, []string{"aaa\n\nbbb", "ccc"}},
+		{"line split", "aaa\nbbb\nccc\nddd", 10, []string{"aaa\nbbb", "ccc\nddd"}},
+		{"space split", "word word word word word", 12, []string{"word word", "word word", "word"}},
+		{"hard split", strings.Repeat("x", 20), 10, []string{strings.Repeat("x", 10), strings.Repeat("x", 10)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SplitText(tt.text, tt.limit)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d chunks, want %d: %q", len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("chunk[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

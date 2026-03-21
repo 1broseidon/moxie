@@ -131,6 +131,8 @@ func HandleCommand(conversationID, text string, client *oneagent.Client, cfg Set
 			return fmt.Sprintf("Backend: %s\nModel: %s", st.Backend, model)
 		}
 		return switchModel(conversationID, arg, st, client)
+	case "think":
+		return handleThinking(conversationID, arg, st)
 	case "cwd":
 		return handleCWD(conversationID, arg, st, cfg, client)
 	case "threads":
@@ -159,7 +161,7 @@ func parseCommand(text string) (base, arg string) {
 
 func isSupportedCommand(name string) bool {
 	switch name {
-	case "new", "model", "cwd", "threads", "compact":
+	case "new", "model", "think", "cwd", "threads", "compact":
 		return true
 	default:
 		return false
@@ -293,22 +295,52 @@ func handleCWD(conversationID, arg string, st store.State, cfg Settings, client 
 }
 
 func switchModel(conversationID, arg string, st store.State, client *oneagent.Client) string {
+	next := st
 	parts := strings.SplitN(arg, " ", 2)
 	if _, ok := client.Backends[parts[0]]; ok {
-		st.Backend = parts[0]
-		st.Model = ""
+		next.Backend = parts[0]
+		next.Model = ""
 		if len(parts) > 1 {
-			st.Model = parts[1]
+			next.Model = parts[1]
 		}
-		store.WriteConversationState(conversationID, st)
-		if st.Model != "" {
-			return fmt.Sprintf("Switched to %s (%s)", st.Backend, st.Model)
+		if next != st {
+			resetNativeSession(client, next)
 		}
-		return "Switched to " + st.Backend
+		store.WriteConversationState(conversationID, next)
+		if next.Model != "" {
+			return fmt.Sprintf("Switched to %s (%s)", next.Backend, next.Model)
+		}
+		return "Switched to " + next.Backend
 	}
-	st.Model = arg
-	store.WriteConversationState(conversationID, st)
+	next.Model = arg
+	if next != st {
+		resetNativeSession(client, next)
+	}
+	store.WriteConversationState(conversationID, next)
 	return "Model set to " + arg
+}
+
+func handleThinking(conversationID, arg string, st store.State) string {
+	if arg == "" {
+		level := st.Thinking
+		if level == "" {
+			level = "off"
+		}
+		return "Thinking: " + level
+	}
+	switch arg {
+	case "off", "none":
+		st.Thinking = ""
+	case "low", "medium", "high":
+		st.Thinking = arg
+	default:
+		return "Usage: /think [off|low|medium|high]"
+	}
+	store.WriteConversationState(conversationID, st)
+	if st.Thinking == "" {
+		return "Thinking disabled."
+	}
+	return "Thinking set to " + st.Thinking
 }
 
 func handleThreads(conversationID, arg string, st store.State, client *oneagent.Client) string {
@@ -331,4 +363,36 @@ func handleThreads(conversationID, arg string, st store.State, client *oneagent.
 	}
 	buf.WriteString("\n/threads <name> to switch")
 	return buf.String()
+}
+
+// SplitText breaks text into chunks of at most limit bytes, preferring
+// paragraph boundaries (\n\n), then line boundaries (\n), then spaces.
+func SplitText(text string, limit int) []string {
+	if len(text) <= limit {
+		return []string{text}
+	}
+	var chunks []string
+	for len(text) > limit {
+		cut := findSplitPoint(text, limit)
+		chunks = append(chunks, text[:cut])
+		text = strings.TrimLeft(text[cut:], "\n ")
+	}
+	if text != "" {
+		chunks = append(chunks, text)
+	}
+	return chunks
+}
+
+func findSplitPoint(text string, limit int) int {
+	window := text[:limit]
+	if cut := strings.LastIndex(window, "\n\n"); cut > limit/2 {
+		return cut
+	}
+	if cut := strings.LastIndex(window, "\n"); cut > limit/2 {
+		return cut
+	}
+	if cut := strings.LastIndex(window, " "); cut > 0 {
+		return cut
+	}
+	return limit
 }

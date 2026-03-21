@@ -169,20 +169,7 @@ func SendPlainText(api messenger, conversation chat.ConversationRef, text string
 
 	sentAny := false
 	var firstErr error
-	for len(text) > 0 {
-		chunk := text
-		if len(chunk) > slackMessageChunkSize {
-			cut := strings.LastIndex(chunk[:slackMessageChunkSize], "\n")
-			if cut <= 0 {
-				cut = slackMessageChunkSize
-			}
-			chunk = text[:cut]
-			text = text[cut:]
-		} else {
-			text = ""
-		}
-		text = strings.TrimPrefix(text, "\n")
-
+	for _, chunk := range chat.SplitText(text, slackMessageChunkSize) {
 		if _, _, err := postPlainText(api, conversation, chunk); err != nil {
 			log.Printf("slack send error: %v", err)
 			if firstErr == nil {
@@ -236,6 +223,14 @@ func replyConversationForJob(job *store.PendingJob, st jobState) chat.Conversati
 	return conversationFromID(job.ConversationID)
 }
 
+func emptyResultMessage(backend string) string {
+	backend = strings.TrimSpace(backend)
+	if backend == "" {
+		return "Backend returned an empty response."
+	}
+	return fmt.Sprintf("Backend %s returned an empty response.", backend)
+}
+
 func DeliverJobResult(api messenger, job *store.PendingJob) error {
 	paths, text := splitResponseFiles(job.Result)
 	notice := fileUploadNotice(paths)
@@ -247,7 +242,7 @@ func DeliverJobResult(api messenger, job *store.PendingJob) error {
 		}
 	}
 	if text == "" && len(paths) == 0 {
-		text = "Done - nothing to report."
+		text = emptyResultMessage(job.State.Backend)
 	}
 	target := replyConversationForJob(job, readJobState(job.ID))
 	if target.Provider != chat.ProviderSlack || target.ChannelID == "" {

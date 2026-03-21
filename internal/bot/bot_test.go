@@ -168,6 +168,26 @@ func TestSendImmediateRetriesAfterDeliveryFailure(t *testing.T) {
 	}
 }
 
+func TestDeliverJobResultReportsEmptyBackendResponse(t *testing.T) {
+	bot := &fakeBot{}
+	job := &PendingJob{
+		ConversationID: "telegram:123",
+		State: store.State{
+			Backend: "pi",
+		},
+	}
+
+	if err := DeliverJobResult(bot, job); err != nil {
+		t.Fatalf("DeliverJobResult(): %v", err)
+	}
+	if len(bot.sendCalls) != 1 {
+		t.Fatalf("send calls = %d, want 1", len(bot.sendCalls))
+	}
+	if got := bot.sendCalls[0].text; got != "Backend pi returned an empty response." {
+		t.Fatalf("sent text = %q", got)
+	}
+}
+
 func TestRetryDeliverableJobsProcessesOnlyTelegramJobs(t *testing.T) {
 	useBotStoreDir(t)
 

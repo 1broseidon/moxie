@@ -124,6 +124,34 @@ func TestDeliverJobResultUsesInlineReplyConversation(t *testing.T) {
 	}
 }
 
+func TestDeliverJobResultReportsEmptyBackendResponse(t *testing.T) {
+	useSlackStoreDir(t)
+
+	var form url.Values
+	client := newSlackTestClient(t, func(rw http.ResponseWriter, req *http.Request) {
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("ParseForm(): %v", err)
+		}
+		form = req.PostForm
+		slackOKResponse(t, rw, map[string]any{"channel": "C123", "ts": "1710.9"})
+	})
+
+	job := &store.PendingJob{
+		ID:             "job-empty",
+		ConversationID: "slack:C123",
+		State: store.State{
+			Backend: "pi",
+		},
+	}
+
+	if err := DeliverJobResult(client, job); err != nil {
+		t.Fatalf("DeliverJobResult(): %v", err)
+	}
+	if got := form.Get("text"); got != "Backend pi returned an empty response." {
+		t.Fatalf("text = %q", got)
+	}
+}
+
 func TestRunningStatusShowUpdateClear(t *testing.T) {
 	useSlackStoreDir(t)
 

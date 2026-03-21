@@ -3,6 +3,7 @@ package dispatch
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,10 +49,37 @@ func IsShuttingDown() bool {
 }
 
 func RunModel(job *store.PendingJob, client *oneagent.Client, onActivity func(activity string)) (string, bool) {
+	maybeClearStalePiSession(client, job)
+
+	resp := runBackend(job, client, onActivity)
+	if resp.Error != "" && job != nil && job.State.Backend == "pi" && IsMissingNativeSessionError(resp.Error) {
+		if ClearNativeSession(client, job.State) {
+			log.Printf("cleared missing pi native session for %s; retrying once", job.State.ThreadID)
+			resp = runBackend(job, client, onActivity)
+		}
+	}
+
+	if resp.Error != "" {
+		if IsShuttingDown() && IsShutdownError(resp.Error) {
+			log.Printf("%s interrupted by shutdown: %s", job.State.Backend, resp.Error)
+			return "", true
+		}
+		log.Printf("%s error: %s", job.State.Backend, resp.Error)
+		return resp.Error, false
+	}
+	return normalizeModelResult(resp.Result), false
+}
+
+func runBackend(job *store.PendingJob, client *oneagent.Client, onActivity func(activity string)) oneagent.Response {
+	if job == nil {
+		return oneagent.Response{Error: "missing job"}
+	}
+
 	opts := oneagent.RunOpts{
 		Backend:  job.State.Backend,
 		Prompt:   job.Prompt,
 		Model:    job.State.Model,
+		Thinking: job.State.Thinking,
 		CWD:      job.CWD,
 		ThreadID: job.State.ThreadID,
 		Source:   job.Source,
@@ -66,16 +94,76 @@ func RunModel(job *store.PendingJob, client *oneagent.Client, onActivity func(ac
 		}
 	}
 
-	resp := client.RunWithThreadStream(opts, emit)
-	if resp.Error != "" {
-		if IsShuttingDown() && IsShutdownError(resp.Error) {
-			log.Printf("%s interrupted by shutdown: %s", job.State.Backend, resp.Error)
-			return "", true
-		}
-		log.Printf("%s error: %s", job.State.Backend, resp.Error)
-		return resp.Error, false
+	return client.RunWithThreadStream(opts, emit)
+}
+
+func maybeClearStalePiSession(client *oneagent.Client, job *store.PendingJob) bool {
+	if client == nil || job == nil || job.State.Backend != "pi" || job.State.ThreadID == "" {
+		return false
 	}
-	return resp.Result, false
+
+	thread, err := client.LoadThread(job.State.ThreadID)
+	if err != nil || thread == nil || thread.NativeSessions == nil {
+		return false
+	}
+	sessionID := strings.TrimSpace(thread.NativeSessions["pi"])
+	if sessionID == "" || piSessionExists(job.CWD, sessionID) {
+		return false
+	}
+
+	if ClearNativeSession(client, job.State) {
+		log.Printf("cleared stale pi native session %s for %s", sessionID, job.State.ThreadID)
+		return true
+	}
+	return false
+}
+
+func piSessionExists(cwd, sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+
+	dir := piSessionDir(cwd)
+	if dir == "" {
+		return false
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, "*_"+sessionID+".jsonl"))
+	return err == nil && len(matches) > 0
+}
+
+func piSessionDir(cwd string) string {
+	if strings.TrimSpace(cwd) == "" {
+		var err error
+		cwd, err = os.Getwd()
+		if err != nil {
+			return ""
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	clean := filepath.Clean(cwd)
+	clean = strings.Trim(clean, string(filepath.Separator))
+	if clean == "" {
+		clean = "root"
+	}
+
+	name := "--" + strings.ReplaceAll(clean, string(filepath.Separator), "-") + "--"
+	return filepath.Join(home, ".pi", "agent", "sessions", name)
+}
+
+func normalizeModelResult(result string) string {
+	switch strings.TrimSpace(result) {
+	case "", "Done — nothing to report.", "Done - nothing to report.":
+		return ""
+	default:
+		return result
+	}
 }
 
 func conversationLock(conversationID string) *sync.Mutex {
