@@ -2,6 +2,25 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.2] - 2026-03-21
+
+### Added
+
+- Top-level `moxie start`, `stop`, `restart`, `reload`, and `status` commands for user service control
+- In-process `SIGHUP` reload support for `moxie serve` so config and backend definitions can be reloaded without exiting the process
+
+### Changed
+
+- Backend prompts now frame Claude, Codex, and other backends as operating on behalf of Moxie
+- Capability descriptions are guided toward local CLI behavior and user-facing Moxie features instead of harness-centric language
+- `poll` and `cursor` are now documented as operator/debug commands instead of primary user commands
+
+### Fixed
+
+- Release workflow can now be manually dispatched for an existing tag
+- Homebrew tap publishing path was validated and backfilled
+- Prompt injection tests now allow the backend identity suffix added to system prompts
+
 ## [0.1.0] - 2026-03-20
 
 Initial public release.

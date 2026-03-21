@@ -241,7 +241,13 @@ func TestApplySystemPrompt(t *testing.T) {
 	if !strings.Contains(backends["claude"].SystemPrompt, TelegramSystemPrompt) {
 		t.Fatalf("claude prompt missing telegram system prompt: %q", backends["claude"].SystemPrompt)
 	}
-	if backends["pi"].SystemPrompt != TelegramSystemPrompt {
-		t.Fatalf("pi prompt = %q, want TelegramSystemPrompt", backends["pi"].SystemPrompt)
+	if !strings.Contains(backends["pi"].SystemPrompt, TelegramSystemPrompt) {
+		t.Fatalf("pi prompt missing telegram system prompt: %q", backends["pi"].SystemPrompt)
+	}
+	if !strings.Contains(backends["pi"].SystemPrompt, "You are running on the pi backend.") {
+		t.Fatalf("pi prompt missing backend identity: %q", backends["pi"].SystemPrompt)
+	}
+	if !strings.Contains(backends["claude"].SystemPrompt, "You are running on the claude backend.") {
+		t.Fatalf("claude prompt missing backend identity: %q", backends["claude"].SystemPrompt)
 	}
 }
