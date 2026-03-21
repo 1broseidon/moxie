@@ -88,6 +88,8 @@ Usage:
 const defaultServiceUnit = "moxie-serve.service"
 const defaultLaunchdLabel = "io.github.1broseidon.moxie"
 
+var launchdReloadSignal os.Signal = syscall.Signal(1)
+
 func serviceUsage() {
 	fmt.Println(`moxie service — control the background service
 
@@ -165,7 +167,11 @@ func runLaunchdUserAction(action string) {
 		if err != nil {
 			fatal("%v", err)
 		}
-		if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			fatal("failed to resolve %s (pid %d): %v", target, pid, err)
+		}
+		if err := proc.Signal(launchdReloadSignal); err != nil {
 			fatal("failed to signal %s (pid %d): %v", target, pid, err)
 		}
 	case "status":
