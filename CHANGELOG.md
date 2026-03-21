@@ -2,6 +2,17 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.4] - 2026-03-21
+
+### Added
+
+- macOS `launchd` support for `moxie service start|stop|restart|reload|status`
+- LaunchAgent documentation for `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist`
+
+### Changed
+
+- macOS service control now follows the per-user LaunchAgent model instead of failing through `systemctl`
+
 ## [0.1.3] - 2026-03-21
 
 ### Changed
