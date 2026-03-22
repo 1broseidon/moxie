@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,38 @@ func TestAddRelativeSchedule(t *testing.T) {
 	}
 	if !sc.NextRun.Equal(want) {
 		t.Fatalf("next run = %v, want %v", sc.NextRun, want)
+	}
+}
+
+func TestAddIntervalSchedule(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+
+	if sc.Trigger != TriggerInterval {
+		t.Fatalf("trigger = %s, want %s", sc.Trigger, TriggerInterval)
+	}
+	if sc.Interval != "1h30m0s" {
+		t.Fatalf("interval = %q, want %q", sc.Interval, "1h30m0s")
+	}
+	if !sc.NextRun.Equal(now.Add(90 * time.Minute)) {
+		t.Fatalf("next run = %v, want %v", sc.NextRun, now.Add(90*time.Minute))
+	}
+	if sc.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.ManagedBy, ManagedByInProcess)
+	}
+	if sc.SyncState != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.SyncState, SyncStateFallback)
 	}
 }
 
@@ -219,10 +252,10 @@ func TestDueSortsAndSkipsRunningSchedules(t *testing.T) {
 	late := now.Add(-5 * time.Minute)
 
 	schedules := []Schedule{
-		{ID: "future", NextRun: now.Add(1 * time.Hour), CreatedAt: now, Text: "future"},
-		{ID: "late", NextRun: late, CreatedAt: now.Add(2 * time.Second), Text: "late"},
-		{ID: "early", NextRun: early, CreatedAt: now.Add(1 * time.Second), Text: "early"},
-		{ID: "running", NextRun: early, CreatedAt: now, Text: "running", RunningJobID: "job-99"},
+		{ID: "future", Trigger: TriggerAt, NextRun: now.Add(1 * time.Hour), CreatedAt: now, Text: "future"},
+		{ID: "late", Trigger: TriggerAt, NextRun: late, CreatedAt: now.Add(2 * time.Second), Text: "late"},
+		{ID: "early", Trigger: TriggerAt, NextRun: early, CreatedAt: now.Add(1 * time.Second), Text: "early"},
+		{ID: "running", Trigger: TriggerAt, NextRun: early, CreatedAt: now, Text: "running", RunningJobID: "job-99"},
 	}
 	if err := store.save(schedules); err != nil {
 		t.Fatalf("save schedules: %v", err)
@@ -290,5 +323,166 @@ func TestNextCronRunValidation(t *testing.T) {
 	}
 	if !got.After(now) {
 		t.Fatalf("nextCronRun() = %v, want after %v", got, now)
+	}
+}
+
+func TestLoadUpgradesLegacyCronSchedule(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+	legacy := fileData{
+		Schedules: []Schedule{
+			{
+				ID:             "sch-legacy-cron",
+				Trigger:        TriggerCron,
+				Action:         ActionDispatch,
+				Cron:           "0 1 * * *",
+				Text:           "Run scan",
+				ConversationID: "telegram:chat",
+				Backend:        "claude",
+				CreatedAt:      now,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy schedules: %v", err)
+	}
+	if err := os.WriteFile(store.path, data, 0600); err != nil {
+		t.Fatalf("write legacy schedules: %v", err)
+	}
+
+	schedules, err := store.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("List() len = %d, want 1", len(schedules))
+	}
+
+	sc := schedules[0]
+	if sc.Trigger != TriggerCalendar {
+		t.Fatalf("trigger = %s, want %s", sc.Trigger, TriggerCalendar)
+	}
+	if sc.Cron != "" {
+		t.Fatalf("legacy cron field = %q, want empty", sc.Cron)
+	}
+	if sc.Calendar == nil {
+		t.Fatal("calendar = nil, want parsed calendar")
+	}
+	if sc.Calendar.Cron != "0 1 * * *" {
+		t.Fatalf("calendar cron = %q, want %q", sc.Calendar.Cron, "0 1 * * *")
+	}
+	if sc.Calendar.CronSpec() != "0 1 * * *" {
+		t.Fatalf("calendar spec = %q, want %q", sc.Calendar.CronSpec(), "0 1 * * *")
+	}
+	if sc.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.ManagedBy, ManagedByInProcess)
+	}
+	if sc.SyncState != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.SyncState, SyncStateFallback)
+	}
+	wantNextRun := time.Date(2026, 3, 18, 1, 0, 0, 0, now.Location())
+	if !sc.NextRun.Equal(wantNextRun) {
+		t.Fatalf("next run = %v, want %v", sc.NextRun, wantNextRun)
+	}
+}
+
+func TestLoadBackfillsLegacyIntervalSchedule(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+	legacy := fileData{
+		Schedules: []Schedule{
+			{
+				ID:        "sch-legacy-interval",
+				Trigger:   TriggerInterval,
+				Action:    ActionDispatch,
+				Interval:  "90m",
+				Text:      "Run cleanup",
+				CreatedAt: now,
+			},
+		},
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy schedules: %v", err)
+	}
+	if err := os.WriteFile(store.path, data, 0600); err != nil {
+		t.Fatalf("write legacy schedules: %v", err)
+	}
+
+	schedules, err := store.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("List() len = %d, want 1", len(schedules))
+	}
+
+	sc := schedules[0]
+	if sc.Trigger != TriggerInterval {
+		t.Fatalf("trigger = %s, want %s", sc.Trigger, TriggerInterval)
+	}
+	if sc.Interval != "1h30m0s" {
+		t.Fatalf("interval = %q, want %q", sc.Interval, "1h30m0s")
+	}
+	if !sc.NextRun.Equal(now.Add(90 * time.Minute)) {
+		t.Fatalf("next run = %v, want %v", sc.NextRun, now.Add(90*time.Minute))
+	}
+	if sc.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.ManagedBy, ManagedByInProcess)
+	}
+	if sc.SyncState != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.SyncState, SyncStateFallback)
+	}
+}
+
+func TestAddPersistsCanonicalCalendarRepresentation(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerCron,
+		Action:  ActionDispatch,
+		Cron:    "0 1 * * *",
+		Text:    "Run scan",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+	if sc.Trigger != TriggerCalendar {
+		t.Fatalf("trigger = %s, want %s", sc.Trigger, TriggerCalendar)
+	}
+
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read schedules file: %v", err)
+	}
+	var doc fileData
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal schedules file: %v", err)
+	}
+	if len(doc.Schedules) != 1 {
+		t.Fatalf("stored schedules len = %d, want 1", len(doc.Schedules))
+	}
+
+	stored := doc.Schedules[0]
+	if stored.Trigger != TriggerCalendar {
+		t.Fatalf("stored trigger = %s, want %s", stored.Trigger, TriggerCalendar)
+	}
+	if stored.Cron != "" {
+		t.Fatalf("stored legacy cron field = %q, want empty", stored.Cron)
+	}
+	if stored.Calendar == nil {
+		t.Fatal("stored calendar = nil, want canonical calendar")
+	}
+	if stored.Calendar.Cron != "0 1 * * *" {
+		t.Fatalf("stored calendar cron = %q, want %q", stored.Calendar.Cron, "0 1 * * *")
+	}
+	if stored.ManagedBy != ManagedByInProcess {
+		t.Fatalf("stored managed_by = %q, want %q", stored.ManagedBy, ManagedByInProcess)
+	}
+	if stored.SyncState != SyncStateFallback {
+		t.Fatalf("stored sync_state = %q, want %q", stored.SyncState, SyncStateFallback)
 	}
 }
