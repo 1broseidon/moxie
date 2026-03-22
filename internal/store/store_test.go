@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func useTempConfigDir(t *testing.T) string {
@@ -76,7 +77,11 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 				ChannelID: "123",
 			},
 		},
-		DefaultCWD: "/tmp/workspace",
+		DefaultCWD:              "/tmp/workspace",
+		SubagentMaxAttempts:     4,
+		SubagentStallTimeout:    "6m",
+		SubagentProgressTimeout: "90s",
+		SubagentRetryBackoff:    []string{"0s", "45s", "3m"},
 	})
 	cfg, err = LoadConfig()
 	if err != nil {
@@ -91,6 +96,76 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 	}
 	if cfg.DefaultCWD != "/tmp/workspace" {
 		t.Fatalf("LoadConfig() default_cwd = %q, want /tmp/workspace", cfg.DefaultCWD)
+	}
+	if cfg.MaxSubagentAttempts() != 4 {
+		t.Fatalf("MaxSubagentAttempts() = %d, want 4", cfg.MaxSubagentAttempts())
+	}
+	if cfg.SubagentStallDuration() != 6*time.Minute {
+		t.Fatalf("SubagentStallDuration() = %v, want 6m", cfg.SubagentStallDuration())
+	}
+	if cfg.SubagentProgressDuration() != 90*time.Second {
+		t.Fatalf("SubagentProgressDuration() = %v, want 90s", cfg.SubagentProgressDuration())
+	}
+	gotBackoff := cfg.SubagentRetryBackoffDurations()
+	wantBackoff := []time.Duration{0, 45 * time.Second, 3 * time.Minute}
+	if len(gotBackoff) != len(wantBackoff) {
+		t.Fatalf("SubagentRetryBackoffDurations() len = %d, want %d", len(gotBackoff), len(wantBackoff))
+	}
+	for i := range wantBackoff {
+		if gotBackoff[i] != wantBackoff[i] {
+			t.Fatalf("SubagentRetryBackoffDurations()[%d] = %v, want %v", i, gotBackoff[i], wantBackoff[i])
+		}
+	}
+}
+
+func TestSubagentSupervisionDefaultsAndInvalidValues(t *testing.T) {
+	cfg := Config{}
+
+	if cfg.MaxSubagentDepth() != defaultSubagentMaxDepth {
+		t.Fatalf("MaxSubagentDepth() = %d, want %d", cfg.MaxSubagentDepth(), defaultSubagentMaxDepth)
+	}
+	if cfg.MaxSubagentAttempts() != defaultSubagentMaxAttempts {
+		t.Fatalf("MaxSubagentAttempts() = %d, want %d", cfg.MaxSubagentAttempts(), defaultSubagentMaxAttempts)
+	}
+	if cfg.SubagentStallDuration() != defaultSubagentStallTimeout {
+		t.Fatalf("SubagentStallDuration() = %v, want %v", cfg.SubagentStallDuration(), defaultSubagentStallTimeout)
+	}
+	if cfg.SubagentProgressDuration() != defaultSubagentProgressTimeout {
+		t.Fatalf("SubagentProgressDuration() = %v, want %v", cfg.SubagentProgressDuration(), defaultSubagentProgressTimeout)
+	}
+	gotBackoff := cfg.SubagentRetryBackoffDurations()
+	if len(gotBackoff) != len(defaultSubagentRetryBackoff) {
+		t.Fatalf("SubagentRetryBackoffDurations() len = %d, want %d", len(gotBackoff), len(defaultSubagentRetryBackoff))
+	}
+	for i := range defaultSubagentRetryBackoff {
+		if gotBackoff[i] != defaultSubagentRetryBackoff[i] {
+			t.Fatalf("SubagentRetryBackoffDurations()[%d] = %v, want %v", i, gotBackoff[i], defaultSubagentRetryBackoff[i])
+		}
+	}
+
+	cfg = Config{
+		SubagentMaxAttempts:     -1,
+		SubagentStallTimeout:    "bad",
+		SubagentProgressTimeout: "0s",
+		SubagentRetryBackoff:    []string{"", "bad", "-1s"},
+	}
+	if cfg.MaxSubagentAttempts() != defaultSubagentMaxAttempts {
+		t.Fatalf("MaxSubagentAttempts() invalid fallback = %d, want %d", cfg.MaxSubagentAttempts(), defaultSubagentMaxAttempts)
+	}
+	if cfg.SubagentStallDuration() != defaultSubagentStallTimeout {
+		t.Fatalf("SubagentStallDuration() invalid fallback = %v, want %v", cfg.SubagentStallDuration(), defaultSubagentStallTimeout)
+	}
+	if cfg.SubagentProgressDuration() != defaultSubagentProgressTimeout {
+		t.Fatalf("SubagentProgressDuration() invalid fallback = %v, want %v", cfg.SubagentProgressDuration(), defaultSubagentProgressTimeout)
+	}
+	gotBackoff = cfg.SubagentRetryBackoffDurations()
+	if len(gotBackoff) != len(defaultSubagentRetryBackoff) {
+		t.Fatalf("SubagentRetryBackoffDurations() invalid fallback len = %d, want %d", len(gotBackoff), len(defaultSubagentRetryBackoff))
+	}
+	for i := range defaultSubagentRetryBackoff {
+		if gotBackoff[i] != defaultSubagentRetryBackoff[i] {
+			t.Fatalf("SubagentRetryBackoffDurations() invalid fallback[%d] = %v, want %v", i, gotBackoff[i], defaultSubagentRetryBackoff[i])
+		}
 	}
 }
 
@@ -237,6 +312,34 @@ func TestReadJobRoundTripAndMissing(t *testing.T) {
 
 	if _, ok := ReadJob("missing-job"); ok {
 		t.Fatal("expected ReadJob to report missing job")
+	}
+}
+
+func TestPendingJobSupervisionRoundTrip(t *testing.T) {
+	useTempConfigDir(t)
+
+	now := time.Date(2026, 3, 22, 12, 0, 0, 0, time.UTC)
+	want := PendingJob{
+		ID:             "job-supervised",
+		ConversationID: "telegram:123",
+		Status:         "running",
+		Supervision: SupervisionState{
+			Attempt:        2,
+			MaxAttempts:    3,
+			ActiveRunID:    "run-123",
+			LastEventAt:    now,
+			LastProgressAt: now.Add(-15 * time.Second),
+			LastError:      "stalled execution",
+		},
+	}
+	WriteJob(want)
+
+	got, ok := ReadJob(want.ID)
+	if !ok {
+		t.Fatal("expected ReadJob to find supervised job")
+	}
+	if got.Supervision != want.Supervision {
+		t.Fatalf("ReadJob() supervision = %+v, want %+v", got.Supervision, want.Supervision)
 	}
 }
 

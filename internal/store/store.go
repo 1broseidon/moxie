@@ -8,14 +8,28 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
+const (
+	defaultSubagentMaxDepth        = 3
+	defaultSubagentMaxAttempts     = 3
+	defaultSubagentStallTimeout    = 5 * time.Minute
+	defaultSubagentProgressTimeout = 2 * time.Minute
+)
+
+var defaultSubagentRetryBackoff = []time.Duration{0, 30 * time.Second, 2 * time.Minute}
+
 type Config struct {
-	Channels         map[string]ChannelConfig `json:"channels,omitempty"`
-	Workspaces       map[string]string        `json:"workspaces,omitempty"`
-	DefaultCWD       string                   `json:"default_cwd,omitempty"`
-	SubagentMaxDepth int                      `json:"subagent_max_depth,omitempty"`
+	Channels                map[string]ChannelConfig `json:"channels,omitempty"`
+	Workspaces              map[string]string        `json:"workspaces,omitempty"`
+	DefaultCWD              string                   `json:"default_cwd,omitempty"`
+	SubagentMaxDepth        int                      `json:"subagent_max_depth,omitempty"`
+	SubagentMaxAttempts     int                      `json:"subagent_max_attempts,omitempty"`
+	SubagentStallTimeout    string                   `json:"subagent_stall_timeout,omitempty"`
+	SubagentProgressTimeout string                   `json:"subagent_progress_timeout,omitempty"`
+	SubagentRetryBackoff    []string                 `json:"subagent_retry_backoff,omitempty"`
 }
 
 type ChannelConfig struct {
@@ -26,12 +40,16 @@ type ChannelConfig struct {
 }
 
 type configFile struct {
-	Channels         map[string]ChannelConfig `json:"channels,omitempty"`
-	Workspaces       map[string]string        `json:"workspaces,omitempty"`
-	DefaultCWD       string                   `json:"default_cwd,omitempty"`
-	SubagentMaxDepth int                      `json:"subagent_max_depth,omitempty"`
-	Token            string                   `json:"token,omitempty"`
-	ChatID           int64                    `json:"chat_id,omitempty"`
+	Channels                map[string]ChannelConfig `json:"channels,omitempty"`
+	Workspaces              map[string]string        `json:"workspaces,omitempty"`
+	DefaultCWD              string                   `json:"default_cwd,omitempty"`
+	SubagentMaxDepth        int                      `json:"subagent_max_depth,omitempty"`
+	SubagentMaxAttempts     int                      `json:"subagent_max_attempts,omitempty"`
+	SubagentStallTimeout    string                   `json:"subagent_stall_timeout,omitempty"`
+	SubagentProgressTimeout string                   `json:"subagent_progress_timeout,omitempty"`
+	SubagentRetryBackoff    []string                 `json:"subagent_retry_backoff,omitempty"`
+	Token                   string                   `json:"token,omitempty"`
+	ChatID                  int64                    `json:"chat_id,omitempty"`
 }
 
 var cfgDir string
@@ -61,10 +79,14 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("config not found: %w\nRun: moxie init", err)
 	}
 	cfg := Config{
-		Channels:         file.Channels,
-		Workspaces:       file.Workspaces,
-		DefaultCWD:       file.DefaultCWD,
-		SubagentMaxDepth: file.SubagentMaxDepth,
+		Channels:                file.Channels,
+		Workspaces:              file.Workspaces,
+		DefaultCWD:              file.DefaultCWD,
+		SubagentMaxDepth:        file.SubagentMaxDepth,
+		SubagentMaxAttempts:     file.SubagentMaxAttempts,
+		SubagentStallTimeout:    file.SubagentStallTimeout,
+		SubagentProgressTimeout: file.SubagentProgressTimeout,
+		SubagentRetryBackoff:    file.SubagentRetryBackoff,
 	}
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = map[string]string{}
@@ -132,7 +154,63 @@ func (cfg Config) MaxSubagentDepth() int {
 	if cfg.SubagentMaxDepth > 0 {
 		return cfg.SubagentMaxDepth
 	}
-	return 3
+	return defaultSubagentMaxDepth
+}
+
+func (cfg Config) MaxSubagentAttempts() int {
+	if cfg.SubagentMaxAttempts > 0 {
+		return cfg.SubagentMaxAttempts
+	}
+	return defaultSubagentMaxAttempts
+}
+
+func (cfg Config) SubagentStallDuration() time.Duration {
+	return parseConfigDuration(cfg.SubagentStallTimeout, defaultSubagentStallTimeout)
+}
+
+func (cfg Config) SubagentProgressDuration() time.Duration {
+	return parseConfigDuration(cfg.SubagentProgressTimeout, defaultSubagentProgressTimeout)
+}
+
+func (cfg Config) SubagentRetryBackoffDurations() []time.Duration {
+	if len(cfg.SubagentRetryBackoff) == 0 {
+		return append([]time.Duration(nil), defaultSubagentRetryBackoff...)
+	}
+	backoff := make([]time.Duration, 0, len(cfg.SubagentRetryBackoff))
+	for _, raw := range cfg.SubagentRetryBackoff {
+		d, ok := parseBackoffDuration(raw)
+		if ok {
+			backoff = append(backoff, d)
+		}
+	}
+	if len(backoff) == 0 {
+		return append([]time.Duration(nil), defaultSubagentRetryBackoff...)
+	}
+	return backoff
+}
+
+func parseConfigDuration(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+func parseBackoffDuration(raw string) (time.Duration, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 func (cfg Config) channel(name string) (ChannelConfig, error) {
@@ -183,26 +261,36 @@ type stateFile struct {
 	Conversations map[string]State `json:"conversations,omitempty"`
 }
 
+type SupervisionState struct {
+	Attempt        int       `json:"attempt,omitempty"`
+	MaxAttempts    int       `json:"max_attempts,omitempty"`
+	ActiveRunID    string    `json:"active_run_id,omitempty"`
+	LastEventAt    time.Time `json:"last_event_at,omitempty"`
+	LastProgressAt time.Time `json:"last_progress_at,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
+}
+
 type PendingJob struct {
-	ID                 string    `json:"id"`
-	SourceEventID      string    `json:"source_event_id,omitempty"`
-	ScheduleID         string    `json:"schedule_id,omitempty"`
-	ParentJobID        string    `json:"parent_job_id,omitempty"`
-	DelegatedTask      string    `json:"delegated_task,omitempty"`
-	DelegationContext  string    `json:"delegation_context,omitempty"`
-	ReplyConversation  string    `json:"reply_conversation,omitempty"`
-	Depth              int       `json:"depth,omitempty"`
-	ConversationID     string    `json:"conversation_id"`
-	Source             string    `json:"source,omitempty"`
-	Prompt             string    `json:"prompt"`
-	CWD                string    `json:"cwd,omitempty"`
-	TempPath           string    `json:"temp_path,omitempty"`
-	BlockingResultPath string    `json:"blocking_result_path,omitempty"`
-	SynthesisState     State     `json:"synthesis_state,omitempty"`
-	State              State     `json:"state"`
-	Status             string    `json:"status"`
-	Result             string    `json:"result,omitempty"`
-	Updated            time.Time `json:"updated"`
+	ID                 string           `json:"id"`
+	SourceEventID      string           `json:"source_event_id,omitempty"`
+	ScheduleID         string           `json:"schedule_id,omitempty"`
+	ParentJobID        string           `json:"parent_job_id,omitempty"`
+	DelegatedTask      string           `json:"delegated_task,omitempty"`
+	DelegationContext  string           `json:"delegation_context,omitempty"`
+	ReplyConversation  string           `json:"reply_conversation,omitempty"`
+	Depth              int              `json:"depth,omitempty"`
+	ConversationID     string           `json:"conversation_id"`
+	Source             string           `json:"source,omitempty"`
+	Prompt             string           `json:"prompt"`
+	CWD                string           `json:"cwd,omitempty"`
+	TempPath           string           `json:"temp_path,omitempty"`
+	BlockingResultPath string           `json:"blocking_result_path,omitempty"`
+	SynthesisState     State            `json:"synthesis_state,omitempty"`
+	State              State            `json:"state"`
+	Supervision        SupervisionState `json:"supervision,omitempty"`
+	Status             string           `json:"status"`
+	Result             string           `json:"result,omitempty"`
+	Updated            time.Time        `json:"updated"`
 }
 
 func ConfigFile(name string) string {
