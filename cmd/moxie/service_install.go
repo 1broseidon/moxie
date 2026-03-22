@@ -119,6 +119,9 @@ func installLaunchdService(opts serviceInstallOptions) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
+	if err := os.MkdirAll(filepath.Dir(launchdLogPath()), 0o755); err != nil {
+		return "", err
+	}
 	content, err := launchdPlistContents(currentBinaryPath(), opts)
 	if err != nil {
 		return "", err
@@ -147,18 +150,16 @@ func systemdServicePath() string {
 }
 
 func currentBinaryPath() string {
+	path, err := exec.LookPath("moxie")
+	if err == nil && path != "" {
+		return path
+	}
 	exe, err := os.Executable()
 	if err == nil && exe != "" {
-		if resolved, resolveErr := filepath.EvalSymlinks(exe); resolveErr == nil && resolved != "" {
-			return resolved
-		}
 		return exe
 	}
-	path, err := exec.LookPath("moxie")
-	if err != nil {
-		fatal("failed to locate moxie binary: %v", err)
-	}
-	return path
+	fatal("failed to locate moxie binary: %v", err)
+	return ""
 }
 
 func serviceCommandArgs(opts serviceInstallOptions) []string {
