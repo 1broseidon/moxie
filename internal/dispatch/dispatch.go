@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -71,8 +72,23 @@ func RunModel(job *store.PendingJob, client *oneagent.Client, onActivity func(ac
 }
 
 func runBackend(job *store.PendingJob, client *oneagent.Client, onActivity func(activity string)) oneagent.Response {
+	emit := func(ev oneagent.StreamEvent) {
+		if ev.Type == "activity" && ev.Activity != "" {
+			log.Printf("[%s] %s", job.State.Backend, ev.Activity)
+			if onActivity != nil {
+				onActivity(ev.Activity)
+			}
+		}
+	}
+	return runBackendWithContext(context.Background(), job, client, emit)
+}
+
+func runBackendWithContext(ctx context.Context, job *store.PendingJob, client *oneagent.Client, emit func(oneagent.StreamEvent)) oneagent.Response {
 	if job == nil {
 		return oneagent.Response{Error: "missing job"}
+	}
+	if client == nil {
+		return oneagent.Response{Error: "missing client", Backend: job.State.Backend, ThreadID: job.State.ThreadID}
 	}
 
 	opts := oneagent.RunOpts{
@@ -87,17 +103,10 @@ func runBackend(job *store.PendingJob, client *oneagent.Client, onActivity func(
 	if job.ID != "" {
 		opts.Env = []string{"MOXIE_JOB_ID=" + job.ID}
 	}
-
-	emit := func(ev oneagent.StreamEvent) {
-		if ev.Type == "activity" && ev.Activity != "" {
-			log.Printf("[%s] %s", job.State.Backend, ev.Activity)
-			if onActivity != nil {
-				onActivity(ev.Activity)
-			}
-		}
+	if ctx == nil {
+		ctx = context.Background()
 	}
-
-	return client.RunWithThreadStream(opts, emit)
+	return client.RunStreamContext(ctx, opts, emit)
 }
 
 func maybeClearStalePiSession(client *oneagent.Client, job *store.PendingJob) bool {
@@ -215,7 +224,16 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	if job.Status != "ready" && job.Status != "delivered" {
 		job.Status = "running"
 		store.WriteJob(*job)
-		result, interrupted := runModelFunc(job, client, callbacks.OnActivity)
+
+		var (
+			result      string
+			interrupted bool
+		)
+		if isSupervisedSubagentJob(job, client) {
+			result, interrupted = runSupervisedSubagent(job, client, callbacks.OnActivity)
+		} else {
+			result, interrupted = runModelFunc(job, client, callbacks.OnActivity)
+		}
 		if interrupted {
 			return
 		}
