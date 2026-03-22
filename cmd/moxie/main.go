@@ -1040,17 +1040,7 @@ func subagentBlockingResultPath(jobID string) string {
 }
 
 func writeBlockingSubagentResult(job store.PendingJob, result string) error {
-	if strings.TrimSpace(job.BlockingResultPath) == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(job.BlockingResultPath), 0700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(job.BlockingResultPath, []byte(result), 0600); err != nil {
-		return err
-	}
-	log.Printf("wrote blocking subagent result for %s", job.ID)
-	return nil
+	return dispatch.WriteBlockingSubagentResult(job, result)
 }
 
 func waitForBlockingSubagentResult(job store.PendingJob) (string, error) {

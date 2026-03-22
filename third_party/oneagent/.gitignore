@@ -1,7 +1,0 @@
-/oa
-/oneagent
-/dist
-docs/node_modules
-docs/.vitepress/dist
-docs/.vitepress/cache
-coverage.out

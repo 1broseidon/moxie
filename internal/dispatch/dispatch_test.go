@@ -1,10 +1,12 @@
 package dispatch_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +233,70 @@ func TestProcessJobInterruptedLeavesRunningJob(t *testing.T) {
 	}
 }
 
+func TestProcessJobInterruptedBlockingSubagentWritesFailureSentinel(t *testing.T) {
+	useTempStoreDir(t)
+	store.SaveConfig(store.Config{
+		Channels: map[string]store.ChannelConfig{
+			"telegram": {
+				Provider:  "telegram",
+				Token:     "token",
+				ChannelID: "123",
+			},
+		},
+		SubagentMaxAttempts:     1,
+		SubagentStallTimeout:    "1s",
+		SubagentProgressTimeout: "1s",
+		SubagentRetryBackoff:    []string{"0s"},
+	})
+
+	dispatch.SetShuttingDown(true)
+	t.Cleanup(func() { dispatch.SetShuttingDown(false) })
+
+	restoreRun := dispatch.SetRunStreamModelFuncForTest(func(ctx context.Context, job *store.PendingJob, _ *oneagent.Client, emit func(oneagent.StreamEvent)) oneagent.Response {
+		return oneagent.Response{Error: context.Canceled.Error(), Backend: job.State.Backend, ThreadID: job.State.ThreadID}
+	})
+	t.Cleanup(restoreRun)
+
+	resultPath := filepath.Join(store.JobsDir(), "job-103-blocking.result")
+	job := &store.PendingJob{
+		ID:                 "job-103-blocking",
+		ConversationID:     "telegram:1",
+		Source:             "subagent",
+		DelegatedTask:      "inspect the blocked child",
+		BlockingResultPath: resultPath,
+		State:              store.State{Backend: "codex", ThreadID: "sub-thread"},
+	}
+
+	resultCalled := false
+	dispatch.ProcessJob(job, &oneagent.Client{}, nil, dispatch.Callbacks{
+		OnResult: func(string) error {
+			resultCalled = true
+			return nil
+		},
+	})
+
+	if resultCalled {
+		t.Fatal("expected OnResult not to be called for interrupted blocking subagent")
+	}
+	if store.JobExists(job.ID) {
+		t.Fatalf("expected interrupted blocking job %s to be removed", job.ID)
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", resultPath, err)
+	}
+	for _, want := range []string{
+		"Blocking subagent failed before producing a normal result.",
+		"Backend: codex",
+		"Task: inspect the blocked child",
+		"Reason: subagent interrupted during shutdown before producing a normal result",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("blocking failure result = %q, want substring %q", string(data), want)
+		}
+	}
+}
+
 func TestProcessJobAllowsParallelDifferentConversations(t *testing.T) {
 	useTempStoreDir(t)
 
@@ -370,6 +436,81 @@ func TestRecoverPendingJobsDiscardsRunningJobWithMissingTemp(t *testing.T) {
 	}
 	if store.JobExists("job-104") {
 		t.Fatal("expected interrupted job with missing temp file to be removed")
+	}
+}
+
+func TestRecoverPendingJobsDiscardsBlockingSubagentWithMissingTempWritesFailureSentinel(t *testing.T) {
+	useTempStoreDir(t)
+
+	resultPath := filepath.Join(store.JobsDir(), "job-104-blocking.result")
+	store.WriteJob(store.PendingJob{
+		ID:                 "job-104-blocking",
+		Status:             "running",
+		Source:             "subagent",
+		TempPath:           filepath.Join(t.TempDir(), "missing.txt"),
+		ConversationID:     "telegram:1",
+		DelegatedTask:      "recover the nested child",
+		BlockingResultPath: resultPath,
+		Updated:            time.Now(),
+		State:              store.State{Backend: "claude", ThreadID: "chat-1"},
+	})
+
+	if !dispatch.RecoverPendingJobs(nil, nil, nil) {
+		t.Fatal("expected RecoverPendingJobs to report work")
+	}
+	if store.JobExists("job-104-blocking") {
+		t.Fatal("expected blocking job with missing temp file to be removed")
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", resultPath, err)
+	}
+	for _, want := range []string{
+		"Blocking subagent failed before producing a normal result.",
+		"Backend: claude",
+		"Task: recover the nested child",
+		"Reason: subagent was discarded during recovery because required temp files were missing",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("blocking recovery failure = %q, want substring %q", string(data), want)
+		}
+	}
+}
+
+func TestRecoverPendingJobsDiscardsBlockingSubagentWithUnknownStateWritesFailureSentinel(t *testing.T) {
+	useTempStoreDir(t)
+
+	resultPath := filepath.Join(store.JobsDir(), "job-104-unknown.result")
+	store.WriteJob(store.PendingJob{
+		ID:                 "job-104-unknown",
+		Status:             "mystery",
+		Source:             "subagent",
+		ConversationID:     "telegram:1",
+		DelegatedTask:      "recover the unknown nested child",
+		BlockingResultPath: resultPath,
+		Updated:            time.Now(),
+		State:              store.State{Backend: "pi", ThreadID: "chat-1"},
+	})
+
+	if !dispatch.RecoverPendingJobs(nil, nil, nil) {
+		t.Fatal("expected RecoverPendingJobs to report work")
+	}
+	if store.JobExists("job-104-unknown") {
+		t.Fatal("expected blocking job with unknown state to be removed")
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", resultPath, err)
+	}
+	for _, want := range []string{
+		"Blocking subagent failed before producing a normal result.",
+		"Backend: pi",
+		"Task: recover the unknown nested child",
+		"Reason: subagent was discarded during recovery because job state \"mystery\" is unsupported",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("blocking recovery failure = %q, want substring %q", string(data), want)
+		}
 	}
 }
 

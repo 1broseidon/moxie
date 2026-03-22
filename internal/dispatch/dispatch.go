@@ -2,9 +2,11 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -100,13 +102,52 @@ func runBackendWithContext(ctx context.Context, job *store.PendingJob, client *o
 		ThreadID: job.State.ThreadID,
 		Source:   job.Source,
 	}
-	if job.ID != "" {
-		opts.Env = []string{"MOXIE_JOB_ID=" + job.ID}
-	}
+	runClient := clientWithJobEnv(client, job)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return client.RunStreamContext(ctx, opts, emit)
+	return runClient.RunStreamContext(ctx, opts, emit)
+}
+
+func clientWithJobEnv(client *oneagent.Client, job *store.PendingJob) *oneagent.Client {
+	if client == nil || job == nil || strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.State.Backend) == "" {
+		return client
+	}
+	backend, ok := client.Backends[job.State.Backend]
+	if !ok {
+		return client
+	}
+	wrapped, ok := wrapBackendWithJobEnv(backend, job.ID)
+	if !ok {
+		return client
+	}
+	cloned := *client
+	cloned.Backends = make(map[string]oneagent.Backend, len(client.Backends))
+	for name, candidate := range client.Backends {
+		cloned.Backends[name] = candidate
+	}
+	cloned.Backends[job.State.Backend] = wrapped
+	return &cloned
+}
+
+func wrapBackendWithJobEnv(backend oneagent.Backend, jobID string) (oneagent.Backend, bool) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" || runtime.GOOS == "windows" {
+		return backend, false
+	}
+	backend.Cmd = wrapCommandWithEnv(backend.Cmd, "MOXIE_JOB_ID", jobID)
+	backend.ResumeCmd = wrapCommandWithEnv(backend.ResumeCmd, "MOXIE_JOB_ID", jobID)
+	return backend, len(backend.Cmd) > 0
+}
+
+func wrapCommandWithEnv(args []string, key, value string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	wrapped := make([]string, 0, len(args)+2)
+	wrapped = append(wrapped, "env", key+"="+value)
+	wrapped = append(wrapped, args...)
+	return wrapped
 }
 
 func maybeClearStalePiSession(client *oneagent.Client, job *store.PendingJob) bool {
@@ -235,6 +276,9 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 			result, interrupted = runModelFunc(job, client, callbacks.OnActivity)
 		}
 		if interrupted {
+			if finalizeBlockingSubagentFailure(job, blockingSubagentInterruptReason()) {
+				return
+			}
 			return
 		}
 		job.Result = result
@@ -348,6 +392,9 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 		case "running":
 			if !CanRetryJob(job) {
 				log.Printf("discarding interrupted job %s; source event may be retried", job.ID)
+				if finalizeBlockingSubagentFailure(&job, "subagent was discarded during recovery because required temp files were missing") {
+					continue
+				}
 				store.CleanupJobTemp(job)
 				store.RemoveJob(job.ID)
 				continue
@@ -356,6 +403,9 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 			ProcessJob(&job, client, schedules, callbacks)
 		default:
 			log.Printf("discarding unknown job state %q for %s", job.Status, job.ID)
+			if finalizeBlockingSubagentFailure(&job, fmt.Sprintf("subagent was discarded during recovery because job state %q is unsupported", job.Status)) {
+				continue
+			}
 			store.CleanupJobTemp(job)
 			store.RemoveJob(job.ID)
 		}

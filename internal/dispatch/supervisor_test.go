@@ -2,6 +2,8 @@ package dispatch_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -254,20 +256,22 @@ func TestProcessJobSupervisedSubagentReturnsTerminalFailureAfterMaxAttempts(t *t
 	})
 	t.Cleanup(restoreRun)
 
+	resultPath := filepath.Join(store.JobsDir(), "job-supervised-terminal-failure.result")
 	job := &store.PendingJob{
-		ID:             "job-supervised-terminal-failure",
-		ConversationID: "telegram:1",
-		Source:         "subagent",
-		DelegatedTask:  "inspect the failing background task",
-		Prompt:         "give up after max attempts",
-		State:          store.State{Backend: "claude", ThreadID: "sub-thread"},
+		ID:                 "job-supervised-terminal-failure",
+		ConversationID:     "telegram:1",
+		Source:             "subagent",
+		DelegatedTask:      "inspect the failing background task",
+		Prompt:             "give up after max attempts",
+		BlockingResultPath: resultPath,
+		State:              store.State{Backend: "claude", ThreadID: "sub-thread"},
 	}
 
 	var gotResult string
 	dispatch.ProcessJob(job, &oneagent.Client{}, nil, dispatch.Callbacks{
 		OnResult: func(result string) error {
 			gotResult = result
-			return nil
+			return dispatch.WriteBlockingSubagentResult(*job, result)
 		},
 	})
 
@@ -284,6 +288,13 @@ func TestProcessJobSupervisedSubagentReturnsTerminalFailureAfterMaxAttempts(t *t
 		if !strings.Contains(gotResult, want) {
 			t.Fatalf("result = %q, want substring %q", gotResult, want)
 		}
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", resultPath, err)
+	}
+	if string(data) != gotResult {
+		t.Fatalf("blocking result file = %q, want %q", string(data), gotResult)
 	}
 	if store.JobExists(job.ID) {
 		t.Fatalf("expected job %s to be removed after terminal failure delivery", job.ID)
