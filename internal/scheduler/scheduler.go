@@ -401,13 +401,9 @@ func (s *Store) load() ([]Schedule, error) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
 	}
-	normalized := make([]Schedule, 0, len(doc.Schedules))
-	for _, sc := range doc.Schedules {
-		upgraded, err := normalizeLoadedSchedule(sc, s.loc)
-		if err != nil {
-			return nil, err
-		}
-		normalized = append(normalized, upgraded)
+	normalized, err := normalizeSchedules(doc.Schedules, s.loc)
+	if err != nil {
+		return nil, err
 	}
 	sortSchedules(normalized)
 	return normalized, nil
@@ -417,12 +413,29 @@ func (s *Store) save(schedules []Schedule) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}
+	normalized, err := normalizeSchedules(schedules, s.loc)
+	if err != nil {
+		return err
+	}
+	schedules = normalized
 	sortSchedules(schedules)
 	data, err := json.MarshalIndent(fileData{Schedules: schedules}, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.path, data, 0600)
+}
+
+func normalizeSchedules(schedules []Schedule, loc *time.Location) ([]Schedule, error) {
+	normalized := make([]Schedule, 0, len(schedules))
+	for _, sc := range schedules {
+		upgraded, err := normalizeLoadedSchedule(sc, loc)
+		if err != nil {
+			return nil, err
+		}
+		normalized = append(normalized, upgraded)
+	}
+	return normalized, nil
 }
 
 func normalizeLoadedSchedule(sc Schedule, loc *time.Location) (Schedule, error) {

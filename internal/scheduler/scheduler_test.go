@@ -486,3 +486,59 @@ func TestAddPersistsCanonicalCalendarRepresentation(t *testing.T) {
 		t.Fatalf("stored sync_state = %q, want %q", stored.SyncState, SyncStateFallback)
 	}
 }
+
+func TestSaveCanonicalizesLegacyScheduleRepresentation(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	if err := store.save([]Schedule{
+		{
+			ID:             "sch-legacy-save",
+			Trigger:        TriggerCron,
+			Action:         ActionDispatch,
+			Cron:           "0 1 * * *",
+			Text:           "Run scan",
+			ConversationID: "telegram:chat",
+			Backend:        "claude",
+			CreatedAt:      now,
+		},
+	}); err != nil {
+		t.Fatalf("save legacy schedule: %v", err)
+	}
+
+	data, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatalf("read schedules file: %v", err)
+	}
+	var doc fileData
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal schedules file: %v", err)
+	}
+	if len(doc.Schedules) != 1 {
+		t.Fatalf("stored schedules len = %d, want 1", len(doc.Schedules))
+	}
+
+	stored := doc.Schedules[0]
+	if stored.Trigger != TriggerCalendar {
+		t.Fatalf("stored trigger = %s, want %s", stored.Trigger, TriggerCalendar)
+	}
+	if stored.Cron != "" {
+		t.Fatalf("stored legacy cron field = %q, want empty", stored.Cron)
+	}
+	if stored.Calendar == nil {
+		t.Fatal("stored calendar = nil, want canonical calendar")
+	}
+	if stored.Calendar.Cron != "0 1 * * *" {
+		t.Fatalf("stored calendar cron = %q, want %q", stored.Calendar.Cron, "0 1 * * *")
+	}
+	if stored.ManagedBy != ManagedByInProcess {
+		t.Fatalf("stored managed_by = %q, want %q", stored.ManagedBy, ManagedByInProcess)
+	}
+	if stored.SyncState != SyncStateFallback {
+		t.Fatalf("stored sync_state = %q, want %q", stored.SyncState, SyncStateFallback)
+	}
+	wantNextRun := time.Date(2026, 3, 18, 1, 0, 0, 0, now.Location())
+	if !stored.NextRun.Equal(wantNextRun) {
+		t.Fatalf("stored next run = %v, want %v", stored.NextRun, wantNextRun)
+	}
+}

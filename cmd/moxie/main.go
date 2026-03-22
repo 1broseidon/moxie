@@ -511,6 +511,8 @@ func cmdSchedule() {
 		cmdScheduleList(scheduleStore)
 	case "show":
 		cmdScheduleShow(scheduleStore, os.Args[3:])
+	case "fire":
+		cmdScheduleFire(scheduleStore, os.Args[3:])
 	case "rm", "delete":
 		cmdScheduleDelete(scheduleStore, os.Args[3:])
 	case "help", "--help", "-h":
@@ -527,6 +529,7 @@ Usage:
   moxie schedule add [flags]
   moxie schedule list
   moxie schedule show <id>
+  moxie schedule fire <id>
   moxie schedule rm <id>
 
 Flags for add:
@@ -719,7 +722,7 @@ func mustScheduleTrigger(in, at, cronSpec string) scheduler.Trigger {
 	}
 	if strings.TrimSpace(cronSpec) != "" {
 		count++
-		trigger = scheduler.TriggerCron
+		trigger = scheduler.TriggerCalendar
 	}
 	if count == 0 {
 		fatal("missing schedule trigger: use --in, --at, or --cron")
@@ -880,6 +883,19 @@ func cmdScheduleShow(scheduleStore *scheduler.Store, args []string) {
 	fmt.Println(renderSchedule(sc))
 }
 
+func cmdScheduleFire(scheduleStore *scheduler.Store, args []string) {
+	if len(args) != 1 {
+		fatal("usage: moxie schedule fire <id>")
+	}
+	if _, err := scheduleStore.Get(strings.TrimSpace(args[0])); err != nil {
+		if os.IsNotExist(err) {
+			fatal("unknown schedule: %s", args[0])
+		}
+		fatal("schedule fire failed: %v", err)
+	}
+	fatal("schedule fire is reserved for native scheduler backends and is not implemented yet")
+}
+
 func cmdScheduleDelete(scheduleStore *scheduler.Store, args []string) {
 	if len(args) != 1 {
 		fatal("usage: moxie schedule rm <id>")
@@ -898,8 +914,10 @@ func formatScheduleHeadline(sc scheduler.Schedule) string {
 	switch sc.Trigger {
 	case scheduler.TriggerAt:
 		return fmt.Sprintf("%s at %s", sc.Action, formatScheduleTime(sc.NextRun))
-	case scheduler.TriggerCron:
-		return fmt.Sprintf("%s cron %s next %s", sc.Action, sc.Cron, formatScheduleTime(sc.NextRun))
+	case scheduler.TriggerInterval:
+		return fmt.Sprintf("%s every %s next %s", sc.Action, sc.Interval, formatScheduleTime(sc.NextRun))
+	case scheduler.TriggerCalendar:
+		return fmt.Sprintf("%s %s %s next %s", sc.Action, scheduleCalendarLabel(sc), scheduleCalendarDisplay(sc), formatScheduleTime(sc.NextRun))
 	default:
 		return fmt.Sprintf("%s next %s", sc.Action, formatScheduleTime(sc.NextRun))
 	}
@@ -912,8 +930,10 @@ func renderSchedule(sc scheduler.Schedule) string {
 	switch sc.Trigger {
 	case scheduler.TriggerAt:
 		fmt.Fprintf(&buf, "Trigger: at %s\n", formatScheduleTime(sc.At))
-	case scheduler.TriggerCron:
-		fmt.Fprintf(&buf, "Trigger: cron %s\n", sc.Cron)
+	case scheduler.TriggerInterval:
+		fmt.Fprintf(&buf, "Trigger: every %s\n", sc.Interval)
+	case scheduler.TriggerCalendar:
+		fmt.Fprintf(&buf, "Trigger: %s %s\n", scheduleCalendarLabel(sc), scheduleCalendarDisplay(sc))
 	}
 	fmt.Fprintf(&buf, "Next run: %s\n", formatScheduleTime(sc.NextRun))
 	if !sc.LastRun.IsZero() {
@@ -937,8 +957,34 @@ func renderSchedule(sc scheduler.Schedule) string {
 	} else if sc.ConversationID != "" {
 		fmt.Fprintf(&buf, "Conversation: %s\n", sc.ConversationID)
 	}
+	if sc.ManagedBy != "" {
+		fmt.Fprintf(&buf, "Managed by: %s\n", sc.ManagedBy)
+	}
+	if sc.SyncState != "" {
+		fmt.Fprintf(&buf, "Sync state: %s\n", sc.SyncState)
+	}
+	if sc.SyncError != "" {
+		fmt.Fprintf(&buf, "Sync error: %s\n", sc.SyncError)
+	}
 	fmt.Fprintf(&buf, "Text: %s\n", sc.Text)
 	return strings.TrimSpace(buf.String())
+}
+
+func scheduleCalendarLabel(sc scheduler.Schedule) string {
+	if sc.Calendar != nil && strings.TrimSpace(sc.Calendar.Cron) != "" {
+		return "cron"
+	}
+	return "calendar"
+}
+
+func scheduleCalendarDisplay(sc scheduler.Schedule) string {
+	if sc.Calendar == nil {
+		return "(none)"
+	}
+	if display := strings.TrimSpace(sc.Calendar.DisplaySpec()); display != "" {
+		return display
+	}
+	return "(none)"
 }
 
 func formatScheduleTime(t time.Time) string {
