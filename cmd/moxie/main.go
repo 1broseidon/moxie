@@ -577,9 +577,9 @@ Flags:
 When to use:
   Only when delegating a distinct self-contained task to another backend
   Do not use it for simple questions or work you can handle directly
-  The subagent runs asynchronously with context from the parent conversation
-  Results are delivered back when complete
-  You can continue working while the subagent runs
+  Top-level subagent calls run asynchronously with context from the parent conversation
+  Nested subagent calls block until the child finishes and print the child result to stdout
+  Completed async runs are delivered back when ready
 
 Examples:
   moxie subagent --backend codex --text "Audit the scheduler retry logic"
