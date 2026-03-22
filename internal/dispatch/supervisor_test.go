@@ -258,6 +258,7 @@ func TestProcessJobSupervisedSubagentReturnsTerminalFailureAfterMaxAttempts(t *t
 		ID:             "job-supervised-terminal-failure",
 		ConversationID: "telegram:1",
 		Source:         "subagent",
+		DelegatedTask:  "inspect the failing background task",
 		Prompt:         "give up after max attempts",
 		State:          store.State{Backend: "claude", ThreadID: "sub-thread"},
 	}
@@ -273,11 +274,107 @@ func TestProcessJobSupervisedSubagentReturnsTerminalFailureAfterMaxAttempts(t *t
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
 	}
-	if !strings.Contains(gotResult, "no progress") {
-		t.Fatalf("result = %q, want progress stall error", gotResult)
+	for _, want := range []string{
+		"Subagent failed after 2/2 supervised attempts.",
+		"Backend: claude",
+		"Task: inspect the failing background task",
+		"Last observed error: subagent stalled: no progress for 30ms",
+		"Would you like me to retry, switch backend, narrow the task, or handle it directly?",
+	} {
+		if !strings.Contains(gotResult, want) {
+			t.Fatalf("result = %q, want substring %q", gotResult, want)
+		}
 	}
 	if store.JobExists(job.ID) {
 		t.Fatalf("expected job %s to be removed after terminal failure delivery", job.ID)
+	}
+}
+
+func TestProcessJobSupervisedSubagentSuppressesCanceledAttemptResult(t *testing.T) {
+	useTempStoreDir(t)
+	writeSupervisionConfig(t, 2, "250ms", "30ms", "0s", "0s")
+
+	restorePoll := dispatch.SetSupervisionPollIntervalForTest(5 * time.Millisecond)
+	t.Cleanup(restorePoll)
+
+	var attempts int
+	releaseSecond := make(chan struct{})
+	restoreRun := dispatch.SetRunStreamModelFuncForTest(func(ctx context.Context, job *store.PendingJob, _ *oneagent.Client, emit func(oneagent.StreamEvent)) oneagent.Response {
+		attempts++
+		switch attempts {
+		case 1:
+			emit(oneagent.StreamEvent{Type: "start", RunID: "run-1", TS: time.Now().UTC(), ThreadID: job.State.ThreadID})
+			ticker := time.NewTicker(5 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return oneagent.Response{Result: "stale success", Backend: job.State.Backend, ThreadID: job.State.ThreadID}
+				case ts := <-ticker.C:
+					emit(oneagent.StreamEvent{Type: "heartbeat", RunID: "run-1", TS: ts.UTC(), ThreadID: job.State.ThreadID})
+				}
+			}
+		case 2:
+			base := time.Date(2026, 3, 22, 18, 15, 0, 0, time.UTC)
+			emit(oneagent.StreamEvent{Type: "start", RunID: "run-2", TS: base, ThreadID: job.State.ThreadID})
+			emit(oneagent.StreamEvent{Type: "activity", RunID: "run-2", TS: base.Add(time.Millisecond), ThreadID: job.State.ThreadID, Activity: "fresh attempt"})
+			<-releaseSecond
+			return oneagent.Response{Result: "fresh success", Backend: job.State.Backend, ThreadID: job.State.ThreadID}
+		default:
+			return oneagent.Response{Error: "unexpected attempt", Backend: job.State.Backend, ThreadID: job.State.ThreadID}
+		}
+	})
+	t.Cleanup(restoreRun)
+
+	job := &store.PendingJob{
+		ID:             "job-supervised-stale-result",
+		ConversationID: "telegram:1",
+		Source:         "subagent",
+		Prompt:         "suppress stale attempt results",
+		State:          store.State{Backend: "claude", ThreadID: "sub-thread"},
+	}
+
+	activitySeen := make(chan string, 1)
+	done := make(chan struct{})
+	var gotResult string
+	go dispatch.ProcessJob(job, &oneagent.Client{}, nil, dispatch.Callbacks{
+		OnActivity: func(activity string) {
+			activitySeen <- activity
+		},
+		OnResult: func(result string) error {
+			gotResult = result
+			return nil
+		},
+		OnDone: func() {
+			close(done)
+		},
+	})
+
+	select {
+	case activity := <-activitySeen:
+		if activity != "fresh attempt" {
+			t.Fatalf("activity = %q, want fresh attempt", activity)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fresh attempt activity")
+	}
+
+	close(releaseSecond)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale-result job to finish")
+	}
+
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if gotResult != "fresh success" {
+		t.Fatalf("result = %q, want fresh success", gotResult)
+	}
+	if strings.Contains(gotResult, "stale success") {
+		t.Fatalf("result = %q, did not want stale success", gotResult)
 	}
 }
 
