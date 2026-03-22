@@ -184,24 +184,25 @@ type stateFile struct {
 }
 
 type PendingJob struct {
-	ID                string    `json:"id"`
-	SourceEventID     string    `json:"source_event_id,omitempty"`
-	ScheduleID        string    `json:"schedule_id,omitempty"`
-	ParentJobID       string    `json:"parent_job_id,omitempty"`
-	DelegatedTask     string    `json:"delegated_task,omitempty"`
-	DelegationContext string    `json:"delegation_context,omitempty"`
-	ReplyConversation string    `json:"reply_conversation,omitempty"`
-	Depth             int       `json:"depth,omitempty"`
-	ConversationID    string    `json:"conversation_id"`
-	Source            string    `json:"source,omitempty"`
-	Prompt            string    `json:"prompt"`
-	CWD               string    `json:"cwd,omitempty"`
-	TempPath          string    `json:"temp_path,omitempty"`
-	SynthesisState    State     `json:"synthesis_state,omitempty"`
-	State             State     `json:"state"`
-	Status            string    `json:"status"`
-	Result            string    `json:"result,omitempty"`
-	Updated           time.Time `json:"updated"`
+	ID                 string    `json:"id"`
+	SourceEventID      string    `json:"source_event_id,omitempty"`
+	ScheduleID         string    `json:"schedule_id,omitempty"`
+	ParentJobID        string    `json:"parent_job_id,omitempty"`
+	DelegatedTask      string    `json:"delegated_task,omitempty"`
+	DelegationContext  string    `json:"delegation_context,omitempty"`
+	ReplyConversation  string    `json:"reply_conversation,omitempty"`
+	Depth              int       `json:"depth,omitempty"`
+	ConversationID     string    `json:"conversation_id"`
+	Source             string    `json:"source,omitempty"`
+	Prompt             string    `json:"prompt"`
+	CWD                string    `json:"cwd,omitempty"`
+	TempPath           string    `json:"temp_path,omitempty"`
+	BlockingResultPath string    `json:"blocking_result_path,omitempty"`
+	SynthesisState     State     `json:"synthesis_state,omitempty"`
+	State              State     `json:"state"`
+	Status             string    `json:"status"`
+	Result             string    `json:"result,omitempty"`
+	Updated            time.Time `json:"updated"`
 }
 
 func ConfigFile(name string) string {

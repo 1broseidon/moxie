@@ -279,6 +279,79 @@ func TestProcessJobAllowsParallelDifferentConversations(t *testing.T) {
 	}
 }
 
+func TestProcessJobSerializesJobsOnSameThreadAcrossSources(t *testing.T) {
+	useTempStoreDir(t)
+
+	started := make(chan string, 2)
+	releaseFirst := make(chan struct{})
+	restoreRun := dispatch.SetRunModelFuncForTest(func(job *store.PendingJob, _ *oneagent.Client, _ func(string)) (string, bool) {
+		started <- job.ID
+		if job.ID == "job-thread-1" {
+			<-releaseFirst
+		}
+		return "done", false
+	})
+	t.Cleanup(restoreRun)
+
+	done := make(chan string, 2)
+	runJob := func(job *store.PendingJob) {
+		dispatch.ProcessJob(job, nil, nil, dispatch.Callbacks{
+			OnResult: func(string) error { return nil },
+			OnDone: func() {
+				done <- job.ID
+			},
+		})
+	}
+
+	go runJob(&store.PendingJob{
+		ID:             "job-thread-1",
+		ConversationID: "telegram:1",
+		Source:         "subagent",
+		State:          store.State{Backend: "claude", ThreadID: "shared-thread"},
+	})
+
+	select {
+	case got := <-started:
+		if got != "job-thread-1" {
+			t.Fatalf("first started job = %q, want job-thread-1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first job to start")
+	}
+
+	go runJob(&store.PendingJob{
+		ID:             "job-thread-2",
+		ConversationID: "slack:C123",
+		Source:         "subagent-synthesis",
+		State:          store.State{Backend: "claude", ThreadID: "shared-thread"},
+	})
+
+	select {
+	case got := <-started:
+		t.Fatalf("second job %q started before shared thread lock released", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+
+	select {
+	case got := <-started:
+		if got != "job-thread-2" {
+			t.Fatalf("second started job = %q, want job-thread-2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second job to start")
+	}
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for serialized jobs to finish")
+		}
+	}
+}
+
 func TestRecoverPendingJobsDiscardsRunningJobWithMissingTemp(t *testing.T) {
 	useTempStoreDir(t)
 

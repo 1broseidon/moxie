@@ -959,6 +959,11 @@ type subagentArgs struct {
 	parentJob string
 }
 
+var (
+	subagentBlockingPollInterval = 50 * time.Millisecond
+	subagentBlockingTimeout      = 10 * time.Minute
+)
+
 func parseSubagentArgs() *subagentArgs {
 	fs := flag.NewFlagSet("subagent", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -986,6 +991,10 @@ func parseSubagentArgs() *subagentArgs {
 	return args
 }
 
+func currentJobID() string {
+	return strings.TrimSpace(os.Getenv("MOXIE_JOB_ID"))
+}
+
 func findParentJob(parentID string) *store.PendingJob {
 	jobs := store.ListJobs()
 	if parentID != "" {
@@ -996,6 +1005,15 @@ func findParentJob(parentID string) *store.PendingJob {
 			}
 		}
 		fatal("parent job not found: %s", parentID)
+	}
+	if currentID := currentJobID(); currentID != "" {
+		for _, j := range jobs {
+			j := j
+			if j.ID == currentID {
+				return &j
+			}
+		}
+		fatal("current job not found: %s", currentID)
 	}
 	var parent *store.PendingJob
 	for _, j := range jobs {
@@ -1011,6 +1029,45 @@ func findParentJob(parentID string) *store.PendingJob {
 		fatal("no active dispatch found — moxie subagent can only be called from within a running dispatch")
 	}
 	return parent
+}
+
+func shouldBlockOnSubagent(parent *store.PendingJob) bool {
+	return parent != nil && parent.Depth > 0
+}
+
+func subagentBlockingResultPath(jobID string) string {
+	return filepath.Join(store.JobsDir(), jobID+".result")
+}
+
+func writeBlockingSubagentResult(job store.PendingJob, result string) error {
+	if strings.TrimSpace(job.BlockingResultPath) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(job.BlockingResultPath), 0700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(job.BlockingResultPath, []byte(result), 0600); err != nil {
+		return err
+	}
+	log.Printf("wrote blocking subagent result for %s", job.ID)
+	return nil
+}
+
+func waitForBlockingSubagentResult(job store.PendingJob) (string, error) {
+	deadline := time.Now().Add(subagentBlockingTimeout)
+	for {
+		if data, err := os.ReadFile(job.BlockingResultPath); err == nil {
+			_ = os.Remove(job.BlockingResultPath)
+			return string(data), nil
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timed out waiting for subagent %s", job.ID)
+		}
+		time.Sleep(subagentBlockingPollInterval)
+	}
 }
 
 func buildSubagentPrompt(text string, parent *store.PendingJob, budget int) string {
@@ -1052,6 +1109,7 @@ func cmdSubagent() {
 	maxDepth := cfg.MaxSubagentDepth()
 
 	parent := findParentJob(args.parentJob)
+	blocking := shouldBlockOnSubagent(parent)
 
 	depth := parent.Depth + 1
 	if depth > maxDepth {
@@ -1090,7 +1148,19 @@ func cmdSubagent() {
 			ThreadID: fmt.Sprintf("sub-%s-%d", parent.State.ThreadID, time.Now().UnixNano()),
 		},
 	}
+	if blocking {
+		job.BlockingResultPath = subagentBlockingResultPath(job.ID)
+	}
 	store.WriteJob(job)
+
+	if blocking {
+		result, err := waitForBlockingSubagentResult(job)
+		if err != nil {
+			fatal("wait for nested subagent %s: %v", job.ID, err)
+		}
+		fmt.Print(result)
+		return
+	}
 
 	fmt.Printf("subagent dispatched: %s\nbackend: %s\ndepth: %d/%d\ntask: %s\n", job.ID, args.backend, depth, maxDepth, args.text)
 }
@@ -1423,14 +1493,23 @@ func subagentCallbacks(job store.PendingJob, synthClient *oneagent.Client, sched
 		OnStatusClear: func() {},
 		OnDone:        func() {},
 		OnResult: func(result string) error {
+			if job.BlockingResultPath != "" {
+				return writeBlockingSubagentResult(job, result)
+			}
 			return dispatchSynthesis(job, result, synthClient, schedules, deliver)
 		},
 	}
 }
 
-// dispatchSynthesis creates a new dispatch on the parent conversation's thread
-// so the main agent can synthesize the subagent result with full context.
+// dispatchSynthesis creates a synthesis job on the parent conversation's thread.
+// It is intentionally queued instead of run inline so subagent completion does
+// not block on the parent conversation lock. Delivery retry/recovery loops will
+// pick it up and run it once the parent thread is available.
 func dispatchSynthesis(subJob store.PendingJob, result string, client *oneagent.Client, schedules *scheduler.Store, deliver func(store.PendingJob) error) error {
+	_ = client
+	_ = schedules
+	_ = deliver
+
 	convState := subJob.SynthesisState
 	if convState == (store.State{}) {
 		convState = store.ReadConversationState(subJob.ConversationID)
@@ -1457,17 +1536,7 @@ func dispatchSynthesis(subJob store.PendingJob, result string, client *oneagent.
 		},
 	}
 	store.WriteJob(synthJob)
-	log.Printf("dispatching synthesis job %s for subagent %s on thread %s", synthJob.ID, subJob.ID, convState.ThreadID)
-
-	dispatch.ProcessJob(&synthJob, client, schedules, dispatch.Callbacks{
-		OnActivity:    func(string) {},
-		OnStatusClear: func() {},
-		OnDone:        func() {},
-		OnResult: func(synthResult string) error {
-			synthJob.Result = synthResult
-			return deliver(synthJob)
-		},
-	})
+	log.Printf("queued synthesis job %s for subagent %s on thread %s", synthJob.ID, subJob.ID, convState.ThreadID)
 	return nil
 }
 

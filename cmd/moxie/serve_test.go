@@ -208,7 +208,7 @@ gui/501/io.github.1broseidon.moxie = {
 	}
 }
 
-func TestDispatchSynthesisPreservesParentStateAndReplyConversation(t *testing.T) {
+func TestDispatchSynthesisQueuesJobForLaterDelivery(t *testing.T) {
 	restoreStore := store.SetConfigDir(t.TempDir())
 	t.Cleanup(restoreStore)
 
@@ -254,12 +254,36 @@ func TestDispatchSynthesisPreservesParentStateAndReplyConversation(t *testing.T)
 		},
 	}
 
-	var delivered store.PendingJob
-	if err := dispatchSynthesis(subJob, "worker result", nil, nil, func(job store.PendingJob) error {
-		delivered = job
-		return nil
-	}); err != nil {
+	if err := dispatchSynthesis(subJob, "worker result", nil, nil, nil); err != nil {
 		t.Fatalf("dispatchSynthesis(): %v", err)
+	}
+
+	jobs := store.ListJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("queued jobs = %d, want 1", len(jobs))
+	}
+	queued := jobs[0]
+	if queued.Source != "subagent-synthesis" {
+		t.Fatalf("queued source = %q, want subagent-synthesis", queued.Source)
+	}
+	if queued.Status != "running" {
+		t.Fatalf("queued status = %q, want running", queued.Status)
+	}
+	if queued.ReplyConversation != "slack:C123:1710.9" {
+		t.Fatalf("queued reply conversation = %q, want original reply target", queued.ReplyConversation)
+	}
+
+	var delivered store.PendingJob
+	if !dispatch.RetryDeliverableJobs(nil, nil, func(job *store.PendingJob) dispatch.Callbacks {
+		return dispatch.Callbacks{
+			OnResult: func(result string) error {
+				delivered = *job
+				delivered.Result = result
+				return nil
+			},
+		}
+	}) {
+		t.Fatal("expected queued synthesis job to be processed")
 	}
 
 	if delivered.Result != "synthesized" {

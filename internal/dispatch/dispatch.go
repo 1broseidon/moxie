@@ -84,6 +84,9 @@ func runBackend(job *store.PendingJob, client *oneagent.Client, onActivity func(
 		ThreadID: job.State.ThreadID,
 		Source:   job.Source,
 	}
+	if job.ID != "" {
+		opts.Env = []string{"MOXIE_JOB_ID=" + job.ID}
+	}
 
 	emit := func(ev oneagent.StreamEvent) {
 		if ev.Type == "activity" && ev.Activity != "" {
@@ -175,6 +178,25 @@ func conversationLock(conversationID string) *sync.Mutex {
 	return lock.(*sync.Mutex)
 }
 
+func jobLockKey(job *store.PendingJob) string {
+	if job == nil {
+		return ""
+	}
+	if threadID := strings.TrimSpace(job.State.ThreadID); threadID != "" {
+		return "thread:" + threadID
+	}
+	return "conversation:" + strings.TrimSpace(job.ConversationID)
+}
+
+func jobLock(job *store.PendingJob) *sync.Mutex {
+	key := jobLockKey(job)
+	if key == "" {
+		return &defaultDispatchMu
+	}
+	lock, _ := dispatchLocks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
 func IsSubagentJob(job *store.PendingJob) bool {
 	return job != nil && IsSubagentSource(job.Source)
 }
@@ -257,15 +279,7 @@ func ProcessJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 		return
 	}
 
-	// Subagent dispatch jobs skip the conversation lock so they can run
-	// concurrently with the parent dispatch that spawned them.
-	// Synthesis jobs take the lock since they run on the parent thread.
-	if job.Source == "subagent" {
-		processJob(job, client, schedules, callbacks)
-		return
-	}
-
-	lock := conversationLock(job.ConversationID)
+	lock := jobLock(job)
 	lock.Lock()
 	defer lock.Unlock()
 	processJob(job, client, schedules, callbacks)
@@ -343,7 +357,7 @@ func makeCallbacks(factory func(*store.PendingJob) Callbacks, job *store.Pending
 }
 
 func retryLockedJob(storedJob store.PendingJob, client *oneagent.Client, schedules *scheduler.Store, callbackFactory func(*store.PendingJob) Callbacks, filter func(store.PendingJob) bool) bool {
-	lock := conversationLock(storedJob.ConversationID)
+	lock := jobLock(&storedJob)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -376,14 +390,6 @@ func RetryDeliverableJobs(client *oneagent.Client, schedules *scheduler.Store, c
 			continue
 		}
 		if !isRetryable(storedJob) {
-			continue
-		}
-
-		if storedJob.Source == "subagent" {
-			job := storedJob
-			log.Printf("retrying deliverable job %s (%s)", job.ID, job.Status)
-			processJob(&job, client, schedules, makeCallbacks(callbackFactory, &job))
-			retried = true
 			continue
 		}
 
