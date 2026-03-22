@@ -2,6 +2,16 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.10] - 2026-03-21
+
+### Changed
+
+- Bumped `oneagent` to `v0.11.10`
+
+### Fixed
+
+- Codex subagents now inherit the backend-agnostic `oneagent` template fix for empty inline assignment args, preventing `exit status 1` when thinking is unset
+
 ## [0.1.9] - 2026-03-21
 
 ### Added
