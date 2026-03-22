@@ -62,3 +62,18 @@ func TestLaunchdPlistContentsIncludesLabelArgsAndLogs(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceSuccessMessage(t *testing.T) {
+	cases := map[string]string{
+		"start":   "Service started",
+		"stop":    "Service stopped",
+		"restart": "Service restarted",
+		"reload":  "Service reloaded",
+		"status":  "",
+	}
+	for action, want := range cases {
+		if got := serviceSuccessMessage(action); got != want {
+			t.Fatalf("serviceSuccessMessage(%q) = %q, want %q", action, got, want)
+		}
+	}
+}

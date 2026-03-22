@@ -2,6 +2,16 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.7] - 2026-03-21
+
+### Fixed
+
+- LaunchAgent installs now prefer the stable `moxie` path from `PATH` instead of a versioned Homebrew Cellar path
+
+### Changed
+
+- `moxie service install`, `start`, `stop`, `uninstall`, `restart`, and `reload` now print explicit confirmation messages on success
+
 ## [0.1.6] - 2026-03-21
 
 ### Added

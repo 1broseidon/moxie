@@ -133,6 +133,24 @@ func cmdServiceControl(action string) {
 	default:
 		fatal("moxie service %s is not implemented for %s yet; use the platform service manager directly", action, runtime.GOOS)
 	}
+	if msg := serviceSuccessMessage(action); msg != "" {
+		fmt.Println(msg)
+	}
+}
+
+func serviceSuccessMessage(action string) string {
+	switch action {
+	case "start":
+		return "Service started"
+	case "stop":
+		return "Service stopped"
+	case "restart":
+		return "Service restarted"
+	case "reload":
+		return "Service reloaded"
+	default:
+		return ""
+	}
 }
 
 func runSystemdUserAction(action string) {
@@ -319,7 +337,6 @@ func cmdInit() {
 	}
 	fmt.Printf("Service definition written to %s\n", path)
 	cmdServiceControl("start")
-	fmt.Println("Service started")
 }
 
 func cmdSend() {
