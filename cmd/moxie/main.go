@@ -911,11 +911,11 @@ func cmdScheduleDelete(scheduleStore *scheduler.Store, args []string) {
 }
 
 func formatScheduleHeadline(sc scheduler.Schedule) string {
-	switch sc.Trigger {
+	switch sc.Spec.Trigger {
 	case scheduler.TriggerAt:
 		return fmt.Sprintf("%s at %s", sc.Action, formatScheduleTime(sc.NextRun))
 	case scheduler.TriggerInterval:
-		return fmt.Sprintf("%s every %s next %s", sc.Action, sc.Interval, formatScheduleTime(sc.NextRun))
+		return fmt.Sprintf("%s every %s next %s", sc.Action, sc.Spec.Interval, formatScheduleTime(sc.NextRun))
 	case scheduler.TriggerCalendar:
 		return fmt.Sprintf("%s %s %s next %s", sc.Action, scheduleCalendarLabel(sc), scheduleCalendarDisplay(sc), formatScheduleTime(sc.NextRun))
 	default:
@@ -927,11 +927,11 @@ func renderSchedule(sc scheduler.Schedule) string {
 	var buf strings.Builder
 	fmt.Fprintf(&buf, "ID: %s\n", sc.ID)
 	fmt.Fprintf(&buf, "Action: %s\n", sc.Action)
-	switch sc.Trigger {
+	switch sc.Spec.Trigger {
 	case scheduler.TriggerAt:
-		fmt.Fprintf(&buf, "Trigger: at %s\n", formatScheduleTime(sc.At))
+		fmt.Fprintf(&buf, "Trigger: at %s\n", formatScheduleTime(sc.Spec.At))
 	case scheduler.TriggerInterval:
-		fmt.Fprintf(&buf, "Trigger: every %s\n", sc.Interval)
+		fmt.Fprintf(&buf, "Trigger: every %s\n", sc.Spec.Interval)
 	case scheduler.TriggerCalendar:
 		fmt.Fprintf(&buf, "Trigger: %s %s\n", scheduleCalendarLabel(sc), scheduleCalendarDisplay(sc))
 	}
@@ -957,31 +957,31 @@ func renderSchedule(sc scheduler.Schedule) string {
 	} else if sc.ConversationID != "" {
 		fmt.Fprintf(&buf, "Conversation: %s\n", sc.ConversationID)
 	}
-	if sc.ManagedBy != "" {
-		fmt.Fprintf(&buf, "Managed by: %s\n", sc.ManagedBy)
+	if sc.Sync.ManagedBy != "" {
+		fmt.Fprintf(&buf, "Managed by: %s\n", sc.Sync.ManagedBy)
 	}
-	if sc.SyncState != "" {
-		fmt.Fprintf(&buf, "Sync state: %s\n", sc.SyncState)
+	if sc.Sync.State != "" {
+		fmt.Fprintf(&buf, "Sync state: %s\n", sc.Sync.State)
 	}
-	if sc.SyncError != "" {
-		fmt.Fprintf(&buf, "Sync error: %s\n", sc.SyncError)
+	if sc.Sync.Error != "" {
+		fmt.Fprintf(&buf, "Sync error: %s\n", sc.Sync.Error)
 	}
 	fmt.Fprintf(&buf, "Text: %s\n", sc.Text)
 	return strings.TrimSpace(buf.String())
 }
 
 func scheduleCalendarLabel(sc scheduler.Schedule) string {
-	if sc.Calendar != nil && strings.TrimSpace(sc.Calendar.Cron) != "" {
+	if sc.Spec.Calendar != nil && strings.TrimSpace(sc.Spec.Calendar.Cron) != "" {
 		return "cron"
 	}
 	return "calendar"
 }
 
 func scheduleCalendarDisplay(sc scheduler.Schedule) string {
-	if sc.Calendar == nil {
+	if sc.Spec.Calendar == nil {
 		return "(none)"
 	}
-	if display := strings.TrimSpace(sc.Calendar.DisplaySpec()); display != "" {
+	if display := strings.TrimSpace(sc.Spec.Calendar.DisplaySpec()); display != "" {
 		return display
 	}
 	return "(none)"

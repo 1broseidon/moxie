@@ -65,27 +65,44 @@ func (c *CalendarSpec) DisplaySpec() string {
 	return c.CronSpec()
 }
 
+type ScheduleSpec struct {
+	Trigger  Trigger       `json:"trigger"`
+	At       time.Time     `json:"at,omitempty"`
+	Interval string        `json:"interval,omitempty"`
+	Calendar *CalendarSpec `json:"calendar,omitempty"`
+
+	legacyCron string `json:"-"`
+}
+
+func (s ScheduleSpec) legacyCronSpec() string {
+	return strings.TrimSpace(s.legacyCron)
+}
+
+type ScheduleSync struct {
+	ManagedBy string `json:"managed_by,omitempty"`
+	State     string `json:"state,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func (s ScheduleSync) isZero() bool {
+	return strings.TrimSpace(s.ManagedBy) == "" && strings.TrimSpace(s.State) == "" && strings.TrimSpace(s.Error) == ""
+}
+
 type Schedule struct {
-	ID             string        `json:"id"`
-	Trigger        Trigger       `json:"trigger"`
-	Action         Action        `json:"action"`
-	At             time.Time     `json:"at,omitempty"`
-	Interval       string        `json:"interval,omitempty"`
-	Calendar       *CalendarSpec `json:"calendar,omitempty"`
-	Cron           string        `json:"cron,omitempty"` // legacy on-disk field
-	Text           string        `json:"text"`
-	ConversationID string        `json:"conversation_id,omitempty"`
-	Backend        string        `json:"backend,omitempty"`
-	Model          string        `json:"model,omitempty"`
-	ThreadID       string        `json:"thread_id,omitempty"`
-	CWD            string        `json:"cwd,omitempty"`
-	CreatedAt      time.Time     `json:"created_at"`
-	NextRun        time.Time     `json:"next_run"`
-	LastRun        time.Time     `json:"last_run,omitempty"`
-	RunningJobID   string        `json:"running_job_id,omitempty"`
-	ManagedBy      string        `json:"managed_by,omitempty"`
-	SyncState      string        `json:"sync_state,omitempty"`
-	SyncError      string        `json:"sync_error,omitempty"`
+	ID             string       `json:"id"`
+	Action         Action       `json:"action"`
+	Spec           ScheduleSpec `json:"spec"`
+	Text           string       `json:"text"`
+	ConversationID string       `json:"conversation_id,omitempty"`
+	Backend        string       `json:"backend,omitempty"`
+	Model          string       `json:"model,omitempty"`
+	ThreadID       string       `json:"thread_id,omitempty"`
+	CWD            string       `json:"cwd,omitempty"`
+	CreatedAt      time.Time    `json:"created_at"`
+	NextRun        time.Time    `json:"next_run"`
+	LastRun        time.Time    `json:"last_run,omitempty"`
+	RunningJobID   string       `json:"running_job_id,omitempty"`
+	Sync           ScheduleSync `json:"sync,omitempty"`
 }
 
 type AddInput struct {
@@ -113,6 +130,126 @@ type Store struct {
 
 type fileData struct {
 	Schedules []Schedule `json:"schedules"`
+}
+
+type scheduleJSON struct {
+	ID             string        `json:"id"`
+	Action         Action        `json:"action"`
+	Spec           *ScheduleSpec `json:"spec,omitempty"`
+	Text           string        `json:"text"`
+	ConversationID string        `json:"conversation_id,omitempty"`
+	Backend        string        `json:"backend,omitempty"`
+	Model          string        `json:"model,omitempty"`
+	ThreadID       string        `json:"thread_id,omitempty"`
+	CWD            string        `json:"cwd,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
+	NextRun        time.Time     `json:"next_run"`
+	LastRun        time.Time     `json:"last_run,omitempty"`
+	RunningJobID   string        `json:"running_job_id,omitempty"`
+	Sync           *ScheduleSync `json:"sync,omitempty"`
+}
+
+type scheduleLegacyJSON struct {
+	ID             string        `json:"id"`
+	Action         Action        `json:"action"`
+	Spec           *ScheduleSpec `json:"spec,omitempty"`
+	Text           string        `json:"text"`
+	ConversationID string        `json:"conversation_id,omitempty"`
+	Backend        string        `json:"backend,omitempty"`
+	Model          string        `json:"model,omitempty"`
+	ThreadID       string        `json:"thread_id,omitempty"`
+	CWD            string        `json:"cwd,omitempty"`
+	CreatedAt      time.Time     `json:"created_at"`
+	NextRun        time.Time     `json:"next_run"`
+	LastRun        time.Time     `json:"last_run,omitempty"`
+	RunningJobID   string        `json:"running_job_id,omitempty"`
+	Sync           *ScheduleSync `json:"sync,omitempty"`
+
+	Trigger   Trigger       `json:"trigger,omitempty"`
+	At        time.Time     `json:"at,omitempty"`
+	Interval  string        `json:"interval,omitempty"`
+	Calendar  *CalendarSpec `json:"calendar,omitempty"`
+	Cron      string        `json:"cron,omitempty"`
+	ManagedBy string        `json:"managed_by,omitempty"`
+	SyncState string        `json:"sync_state,omitempty"`
+	SyncError string        `json:"sync_error,omitempty"`
+}
+
+func (sc Schedule) MarshalJSON() ([]byte, error) {
+	raw := scheduleJSON{
+		ID:             sc.ID,
+		Action:         sc.Action,
+		Spec:           &sc.Spec,
+		Text:           sc.Text,
+		ConversationID: sc.ConversationID,
+		Backend:        sc.Backend,
+		Model:          sc.Model,
+		ThreadID:       sc.ThreadID,
+		CWD:            sc.CWD,
+		CreatedAt:      sc.CreatedAt,
+		NextRun:        sc.NextRun,
+		LastRun:        sc.LastRun,
+		RunningJobID:   sc.RunningJobID,
+	}
+	if !sc.Sync.isZero() {
+		sync := sc.Sync
+		raw.Sync = &sync
+	}
+	return json.Marshal(raw)
+}
+
+func (sc *Schedule) UnmarshalJSON(data []byte) error {
+	var raw scheduleLegacyJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*sc = Schedule{
+		ID:             raw.ID,
+		Action:         raw.Action,
+		Text:           raw.Text,
+		ConversationID: raw.ConversationID,
+		Backend:        raw.Backend,
+		Model:          raw.Model,
+		ThreadID:       raw.ThreadID,
+		CWD:            raw.CWD,
+		CreatedAt:      raw.CreatedAt,
+		NextRun:        raw.NextRun,
+		LastRun:        raw.LastRun,
+		RunningJobID:   raw.RunningJobID,
+	}
+
+	if raw.Spec != nil {
+		sc.Spec = *raw.Spec
+	}
+	if sc.Spec.Trigger == "" {
+		sc.Spec.Trigger = raw.Trigger
+	}
+	if sc.Spec.At.IsZero() {
+		sc.Spec.At = raw.At
+	}
+	if strings.TrimSpace(sc.Spec.Interval) == "" {
+		sc.Spec.Interval = raw.Interval
+	}
+	if sc.Spec.Calendar == nil {
+		sc.Spec.Calendar = raw.Calendar
+	}
+	sc.Spec.legacyCron = strings.TrimSpace(raw.Cron)
+
+	if raw.Sync != nil {
+		sc.Sync = *raw.Sync
+	}
+	if sc.Sync.ManagedBy == "" {
+		sc.Sync.ManagedBy = strings.TrimSpace(raw.ManagedBy)
+	}
+	if sc.Sync.State == "" {
+		sc.Sync.State = strings.TrimSpace(raw.SyncState)
+	}
+	if sc.Sync.Error == "" {
+		sc.Sync.Error = strings.TrimSpace(raw.SyncError)
+	}
+
+	return nil
 }
 
 func NewStore(path string, loc *time.Location) *Store {
@@ -277,7 +414,7 @@ func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, erro
 		}
 		sc.RunningJobID = ""
 		sc.LastRun = finishedAt
-		if sc.Trigger == TriggerAt {
+		if sc.Spec.Trigger == TriggerAt {
 			next := append(schedules[:i:i], schedules[i+1:]...)
 			if err := s.save(next); err != nil {
 				return Schedule{}, err
@@ -343,9 +480,11 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 	}
 
 	sc := Schedule{
-		ID:             newID(now),
-		Trigger:        trigger,
-		Action:         action,
+		ID:     newID(now),
+		Action: action,
+		Spec: ScheduleSpec{
+			Trigger: trigger,
+		},
 		Text:           text,
 		ConversationID: strings.TrimSpace(input.ConversationID),
 		Backend:        strings.TrimSpace(input.Backend),
@@ -353,8 +492,10 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 		ThreadID:       strings.TrimSpace(input.ThreadID),
 		CWD:            strings.TrimSpace(input.CWD),
 		CreatedAt:      now,
-		ManagedBy:      ManagedByInProcess,
-		SyncState:      SyncStateFallback,
+		Sync: ScheduleSync{
+			ManagedBy: ManagedByInProcess,
+			State:     SyncStateFallback,
+		},
 	}
 
 	switch trigger {
@@ -366,21 +507,21 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 		if !at.After(now) {
 			return Schedule{}, fmt.Errorf("scheduled time must be in the future")
 		}
-		sc.At = at
+		sc.Spec.At = at
 		sc.NextRun = at
 	case TriggerInterval:
 		d, err := parseEvery(strings.TrimSpace(input.Every))
 		if err != nil {
 			return Schedule{}, err
 		}
-		sc.Interval = d.String()
+		sc.Spec.Interval = d.String()
 		sc.NextRun = now.Add(d)
 	case TriggerCalendar:
 		calendar, nextRun, err := resolveCalendar(strings.TrimSpace(input.Cron), input.Calendar, now, s.loc)
 		if err != nil {
 			return Schedule{}, err
 		}
-		sc.Calendar = calendar
+		sc.Spec.Calendar = calendar
 		sc.NextRun = nextRun
 	default:
 		return Schedule{}, fmt.Errorf("unsupported trigger: %s", trigger)
@@ -442,65 +583,68 @@ func normalizeLoadedSchedule(sc Schedule, loc *time.Location) (Schedule, error) 
 	if loc == nil {
 		loc = time.Local
 	}
-	sc.Trigger = inferTrigger(sc)
-	if sc.ManagedBy == "" {
-		sc.ManagedBy = ManagedByInProcess
+	sc.Spec.Trigger = inferTrigger(sc)
+	sc.Sync.ManagedBy = strings.TrimSpace(sc.Sync.ManagedBy)
+	sc.Sync.State = strings.TrimSpace(sc.Sync.State)
+	sc.Sync.Error = strings.TrimSpace(sc.Sync.Error)
+	if sc.Sync.ManagedBy == "" {
+		sc.Sync.ManagedBy = ManagedByInProcess
 	}
-	if sc.SyncState == "" {
-		sc.SyncState = SyncStateFallback
+	if sc.Sync.State == "" {
+		sc.Sync.State = SyncStateFallback
 	}
 
-	switch sc.Trigger {
+	switch sc.Spec.Trigger {
 	case TriggerAt:
-		if sc.NextRun.IsZero() && !sc.At.IsZero() {
-			sc.NextRun = sc.At
+		if sc.NextRun.IsZero() && !sc.Spec.At.IsZero() {
+			sc.NextRun = sc.Spec.At
 		}
 	case TriggerInterval:
-		d, err := parseEvery(sc.Interval)
+		d, err := parseEvery(sc.Spec.Interval)
 		if err != nil {
 			return Schedule{}, err
 		}
-		sc.Interval = d.String()
+		sc.Spec.Interval = d.String()
 		if sc.NextRun.IsZero() {
 			base := firstNonZeroTime(sc.LastRun, sc.CreatedAt, time.Now().In(loc))
 			sc.NextRun = base.Add(d)
 		}
 	case TriggerCalendar:
-		calendar, err := normalizeCalendar(sc.Calendar, sc.Cron)
+		calendar, err := normalizeCalendar(sc.Spec.Calendar, sc.Spec.legacyCronSpec())
 		if err != nil {
 			return Schedule{}, err
 		}
-		sc.Calendar = calendar
-		sc.Cron = ""
+		sc.Spec.Calendar = calendar
+		sc.Spec.legacyCron = ""
 		if sc.NextRun.IsZero() {
 			base := firstNonZeroTime(sc.LastRun, sc.CreatedAt, time.Now().In(loc))
-			nextRun, err := nextCalendarRun(sc.Calendar, base, loc)
+			nextRun, err := nextCalendarRun(sc.Spec.Calendar, base, loc)
 			if err != nil {
 				return Schedule{}, err
 			}
 			sc.NextRun = nextRun
 		}
 	default:
-		return Schedule{}, fmt.Errorf("unsupported trigger: %s", sc.Trigger)
+		return Schedule{}, fmt.Errorf("unsupported trigger: %s", sc.Spec.Trigger)
 	}
 
 	return sc, nil
 }
 
 func inferTrigger(sc Schedule) Trigger {
-	switch canonicalTrigger(sc.Trigger) {
+	switch canonicalTrigger(sc.Spec.Trigger) {
 	case TriggerAt, TriggerInterval, TriggerCalendar:
-		return canonicalTrigger(sc.Trigger)
+		return canonicalTrigger(sc.Spec.Trigger)
 	}
 	switch {
-	case !sc.At.IsZero():
+	case !sc.Spec.At.IsZero():
 		return TriggerAt
-	case strings.TrimSpace(sc.Interval) != "":
+	case strings.TrimSpace(sc.Spec.Interval) != "":
 		return TriggerInterval
-	case sc.Calendar != nil || strings.TrimSpace(sc.Cron) != "":
+	case sc.Spec.Calendar != nil || sc.Spec.legacyCronSpec() != "":
 		return TriggerCalendar
 	default:
-		return canonicalTrigger(sc.Trigger)
+		return canonicalTrigger(sc.Spec.Trigger)
 	}
 }
 
@@ -754,15 +898,15 @@ func expandCronDescriptor(raw string) (string, error) {
 }
 
 func nextScheduleRun(sc Schedule, after time.Time, loc *time.Location) (time.Time, error) {
-	switch sc.Trigger {
+	switch sc.Spec.Trigger {
 	case TriggerInterval:
-		return nextIntervalRun(sc.Interval, after)
+		return nextIntervalRun(sc.Spec.Interval, after)
 	case TriggerCalendar:
-		return nextCalendarRun(sc.Calendar, after, loc)
+		return nextCalendarRun(sc.Spec.Calendar, after, loc)
 	case TriggerCron:
-		return nextCalendarRun(sc.Calendar, after, loc)
+		return nextCalendarRun(sc.Spec.Calendar, after, loc)
 	default:
-		return time.Time{}, fmt.Errorf("trigger %s does not support next run calculation", sc.Trigger)
+		return time.Time{}, fmt.Errorf("trigger %s does not support next run calculation", sc.Spec.Trigger)
 	}
 }
 
