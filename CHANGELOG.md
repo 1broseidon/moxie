@@ -2,6 +2,26 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.0] - 2026-03-22
+
+### Added
+
+- Supervised subagent execution with config-driven retry/backoff, stall detection, progress timeouts, and terminal escalation after repeated failure
+- Persisted subagent supervision state for attempts, active run IDs, and last-seen event/progress timestamps
+- Blocking subagent failure recovery so nested parent runs are unblocked immediately instead of hanging until timeout
+
+### Changed
+
+- Moxie now consumes `oneagent v0.11.11` telemetry with per-run IDs, timestamps, start events, and heartbeats
+- Subagent dispatch now serializes work by backend thread ID when available, preventing same-thread races across subagent and synthesis paths
+- Nested `moxie subagent` calls now prefer the immediate parent job via `MOXIE_JOB_ID` and block until child completion
+- Synthesis is queued instead of running inline on the parent thread
+
+### Fixed
+
+- Stale subagent attempt events/results no longer overwrite the active attempt outcome
+- Hanging or discarded blocking child jobs now surface deterministic failure results back to their waiting parent
+
 ## [0.1.10] - 2026-03-21
 
 ### Changed
