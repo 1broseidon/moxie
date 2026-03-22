@@ -4,7 +4,7 @@
 
 ### `moxie init`
 
-Interactive setup for Telegram. Prompts for bot token and chat ID, writes `~/.config/moxie/config.json`, and can optionally install/start the background service.
+Interactive setup for Telegram. Prompts for bot token, chat ID, and a default workspace, writes `~/.config/moxie/config.json`, and can optionally install/start the background service. This is the recommended first-run path.
 
 ### `moxie serve`
 
@@ -16,7 +16,7 @@ moxie serve [--cwd <dir>] [--transport <telegram|slack>]
 
 | Flag | Description |
 |------|-------------|
-| `--cwd` | Default working directory for agent backends |
+| `--cwd` | Explicit working directory override. Without this flag, `moxie serve` prefers the current shell directory, then `default_cwd`, then the platform workspace default. |
 | `--transport` | Run only the specified transport |
 
 ### `moxie send`
@@ -110,6 +110,8 @@ moxie service restart
 moxie service reload
 moxie service status
 ```
+
+`moxie service install` uses `--cwd` if provided. Otherwise it uses `default_cwd` from config, or the platform-managed workspace default.
 
 On Linux, `reload` sends `SIGHUP` to the running service so it can reload config and backend definitions without exiting the process.
 

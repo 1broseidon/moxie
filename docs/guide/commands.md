@@ -9,7 +9,7 @@ Commands available in Telegram and Slack conversations. All commands start with 
 | `/new [backend] [workspace]` | Start a new conversation thread |
 | `/model [backend] [model]` | Show or switch the agent backend |
 | `/think [off\|low\|medium\|high]` | Show or set thinking/reasoning effort |
-| `/cwd [name\|path]` | Show or switch working directory |
+| `/cwd [name]` | Show the current directory or switch to a named workspace |
 | `/threads [name]` | List or switch threads |
 | `/compact` | Compact the current thread history |
 
@@ -51,13 +51,12 @@ Control reasoning effort for backends that support it (Claude, Codex, Pi).
 
 ## `/cwd`
 
-Switch the working directory the agent operates in.
+Show the current working directory or manage named workspaces.
 
 ```
-/cwd                    → show current directory
-/cwd /home/user/project → switch to absolute path
+/cwd                    → show current directory and saved workspaces
 /cwd myapp              → switch to named workspace
-/cwd myapp /path/to/it  → create a named workspace and switch to it
+/cwd myapp /path/to/it  → save or update named workspace
 ```
 
 Named workspaces are saved to the config and persist across restarts.

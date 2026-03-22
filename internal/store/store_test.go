@@ -76,6 +76,7 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 				ChannelID: "123",
 			},
 		},
+		DefaultCWD: "/tmp/workspace",
 	})
 	cfg, err = LoadConfig()
 	if err != nil {
@@ -87,6 +88,9 @@ func TestLoadConfigValidationAndDefaults(t *testing.T) {
 	}
 	if tg.Token != "abc" || tg.ChannelID != "123" {
 		t.Fatalf("LoadConfig() telegram = %+v, want token/channel preserved", tg)
+	}
+	if cfg.DefaultCWD != "/tmp/workspace" {
+		t.Fatalf("LoadConfig() default_cwd = %q, want /tmp/workspace", cfg.DefaultCWD)
 	}
 }
 

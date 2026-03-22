@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Channels         map[string]ChannelConfig `json:"channels,omitempty"`
 	Workspaces       map[string]string        `json:"workspaces,omitempty"`
+	DefaultCWD       string                   `json:"default_cwd,omitempty"`
 	SubagentMaxDepth int                      `json:"subagent_max_depth,omitempty"`
 }
 
@@ -27,6 +28,7 @@ type ChannelConfig struct {
 type configFile struct {
 	Channels         map[string]ChannelConfig `json:"channels,omitempty"`
 	Workspaces       map[string]string        `json:"workspaces,omitempty"`
+	DefaultCWD       string                   `json:"default_cwd,omitempty"`
 	SubagentMaxDepth int                      `json:"subagent_max_depth,omitempty"`
 	Token            string                   `json:"token,omitempty"`
 	ChatID           int64                    `json:"chat_id,omitempty"`
@@ -61,6 +63,7 @@ func LoadConfig() (Config, error) {
 	cfg := Config{
 		Channels:         file.Channels,
 		Workspaces:       file.Workspaces,
+		DefaultCWD:       file.DefaultCWD,
 		SubagentMaxDepth: file.SubagentMaxDepth,
 	}
 	if cfg.Workspaces == nil {

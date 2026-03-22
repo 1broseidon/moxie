@@ -1,6 +1,6 @@
 # Getting Started
 
-Moxie connects Telegram and Slack to AI coding agents. Messages you send from your phone are dispatched to agent backends — Claude, Codex, Gemini, Pi, or any CLI that [oneagent](https://github.com/1broseidon/oneagent) supports — and the response is delivered back to your chat.
+Moxie connects Telegram and Slack to AI coding agents. Messages you send from your phone are dispatched to supported agent backends like Claude, Codex, Gemini, Pi, and OpenCode, and the response is delivered back to your chat.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ go install github.com/1broseidon/moxie/cmd/moxie@latest
 
 ## Configure
 
-The fastest path is Telegram — two values and you're running.
+The recommended path is Telegram plus service install during `moxie init`.
 
 ### 1. Create a Telegram bot
 
@@ -43,17 +43,25 @@ Find `"chat":{"id":123456}` in the JSON response. That number is your chat ID.
 moxie init
 ```
 
-Paste your bot token and chat ID when prompted. This creates `~/.config/moxie/config.json`.
+Paste your bot token and chat ID when prompted. Init also asks for a default workspace path, writes everything to `~/.config/moxie/config.json`, and can install and start Moxie as a background service for you.
 
-Init can also offer to install and start Moxie as a background service for you.
+### 4. Preferred: let init install the service
 
-### 4. Start the service
+If you said yes during `moxie init`, Moxie should already be running in the background. You can confirm with:
+
+```bash
+moxie service status
+```
+
+### 5. Manual fallback: run in the foreground
+
+If you skipped service install, you can still run Moxie manually:
 
 ```bash
 moxie serve
 ```
 
-If you chose service install during `moxie init`, you can skip this step.
+Running `moxie serve` from inside a project is useful when you want that shell directory to become the active default working directory.
 
 Send a message to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
 
@@ -63,7 +71,7 @@ When you send a message:
 
 1. Moxie receives it via the Telegram or Slack transport
 2. The message is dispatched to the configured agent backend (e.g. `claude -p "your message"`)
-3. The agent works in the configured working directory
+3. The agent works in the current conversation directory, or falls back to the configured default workspace
 4. The response is delivered back to your chat
 
 While the agent is working, you'll see a typing indicator and activity updates (tool calls, file reads, etc.) as status messages.

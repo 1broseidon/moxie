@@ -2,6 +2,23 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.9] - 2026-03-21
+
+### Added
+
+- Configurable `default_cwd` with platform-specific managed workspace defaults for Linux and macOS
+
+### Changed
+
+- `moxie init` now prompts for a default workspace and can install the service against that configured default
+- `moxie serve` now prefers an explicit `--cwd`, then the current shell directory, then `default_cwd`, then the platform workspace default
+- `moxie service install` now uses the service manager working directory instead of passing `--cwd` to `moxie serve`
+- README and docs now emphasize the service-first setup flow and remove internal `oneagent`/`oa list` references from user-facing guidance
+
+### Fixed
+
+- User-facing docs now match actual `/cwd` behavior for named workspaces
+
 ## [0.1.8] - 2026-03-22
 
 ### Fixed

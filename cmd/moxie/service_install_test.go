@@ -10,7 +10,7 @@ func TestServiceCommandArgs(t *testing.T) {
 		cwd:       "/tmp/work",
 		transport: "slack",
 	})
-	want := []string{"serve", "--cwd", "/tmp/work", "--transport", "slack"}
+	want := []string{"serve", "--transport", "slack"}
 	if len(got) != len(want) {
 		t.Fatalf("serviceCommandArgs() len = %d, want %d", len(got), len(want))
 	}
@@ -25,11 +25,14 @@ func TestSystemdUnitContentsIncludesExecStartAndReload(t *testing.T) {
 	unit, err := systemdUnitContents("/usr/local/bin/moxie", serviceInstallOptions{
 		cwd:       "/srv/moxie",
 		transport: "telegram",
-	})
+	}, "/srv/moxie")
 	if err != nil {
 		t.Fatalf("systemdUnitContents() err = %v", err)
 	}
-	if !strings.Contains(unit, "ExecStart=/usr/local/bin/moxie serve --cwd /srv/moxie --transport telegram") {
+	if !strings.Contains(unit, "WorkingDirectory=/srv/moxie") {
+		t.Fatalf("unit missing WorkingDirectory: %q", unit)
+	}
+	if !strings.Contains(unit, "ExecStart=/usr/local/bin/moxie serve --transport telegram") {
 		t.Fatalf("unit missing ExecStart: %q", unit)
 	}
 	if !strings.Contains(unit, "ExecReload=/bin/kill -HUP $MAINPID") {
@@ -44,7 +47,7 @@ func TestLaunchdPlistContentsIncludesLabelArgsAndLogs(t *testing.T) {
 	plist, err := launchdPlistContents("/opt/homebrew/bin/moxie", serviceInstallOptions{
 		cwd:       "/Users/you/projects/default",
 		transport: "slack",
-	})
+	}, "/Users/you/projects/default")
 	if err != nil {
 		t.Fatalf("launchdPlistContents() err = %v", err)
 	}
@@ -52,7 +55,7 @@ func TestLaunchdPlistContentsIncludesLabelArgsAndLogs(t *testing.T) {
 		"<string>" + defaultLaunchdLabel + "</string>",
 		"<string>/opt/homebrew/bin/moxie</string>",
 		"<string>serve</string>",
-		"<string>--cwd</string>",
+		"<key>WorkingDirectory</key>",
 		"<string>/Users/you/projects/default</string>",
 		"<string>--transport</string>",
 		"<string>slack</string>",

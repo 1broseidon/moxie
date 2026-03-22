@@ -23,6 +23,7 @@ Moxie reads its config from `~/.config/moxie/config.json`.
     "myapp": "/home/user/projects/myapp",
     "ops": "/home/user/projects/ops"
   },
+  "default_cwd": "/home/user/.local/share/moxie/workspace",
   "subagent_max_depth": 3
 }
 ```
@@ -33,6 +34,7 @@ Moxie reads its config from `~/.config/moxie/config.json`.
 |-------|------|---------|-------------|
 | `channels` | object | | Transport configurations (see below) |
 | `workspaces` | object | `{}` | Named directory shortcuts for `/cwd` |
+| `default_cwd` | string | platform-specific workspace | Default working directory when no conversation override or explicit `--cwd` is set |
 | `subagent_max_depth` | int | `3` | Maximum nesting depth for subagent delegation |
 
 ## Channel: Telegram
@@ -60,15 +62,21 @@ Per-conversation state is stored automatically in `~/.config/moxie/` and include
 |-------|-------------|
 | Backend | Which agent CLI to use |
 | Model | Model override for the backend |
-| Thread ID | Current oneagent thread |
+| Thread ID | Current conversation thread |
 | CWD | Working directory |
 | Thinking | Reasoning effort level |
 
 State is managed through [chat commands](../guide/commands) and persists across restarts.
 
+Platform workspace defaults:
+
+- Linux: `~/.local/share/moxie/workspace`
+- macOS: `~/Library/Application Support/Moxie/workspace`
+- Windows: `%LocalAppData%\Moxie\workspace`
+
 ## Backend configuration
 
-Agent backends use the [oneagent](https://github.com/1broseidon/oneagent) schema, but Moxie loads embedded defaults itself and applies overrides from `~/.config/moxie/backends.json`.
+Moxie loads embedded backend defaults and applies overrides from `~/.config/moxie/backends.json`.
 
 To customize, create `~/.config/moxie/backends.json`. See [Backends](../guide/backends) for details.
 
@@ -81,7 +89,8 @@ For always-on operation, create `~/.config/systemd/user/moxie-serve.service`, or
 Description=Moxie chat agent
 
 [Service]
-ExecStart=%h/go/bin/moxie serve --cwd %h/projects/default
+WorkingDirectory=%h/.local/share/moxie/workspace
+ExecStart=%h/go/bin/moxie serve
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
@@ -128,4 +137,4 @@ moxie service reload
 moxie service status
 ```
 
-When generated via `moxie service install`, the LaunchAgent also captures the current `PATH` and `HOME` so backend CLIs remain available outside your interactive shell session.
+When generated via `moxie service install`, the LaunchAgent also captures the current `PATH` and `HOME` so backend CLIs remain available outside your interactive shell session. The service working directory comes from `--cwd`, otherwise `default_cwd`, otherwise the platform workspace default.

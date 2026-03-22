@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/1broseidon/moxie/internal/store"
 )
 
 type serviceInstallOptions struct {
@@ -53,7 +55,7 @@ func parseServiceInstallArgs(args []string) serviceInstallOptions {
 		fatal("unsupported transport for service install: %s", opts.transport)
 	}
 	if opts.cwd != "" {
-		resolved, err := resolveDir(opts.cwd)
+		resolved, err := resolveOrCreateDir(opts.cwd)
 		if err != nil {
 			fatal("invalid --cwd: %v", err)
 		}
@@ -89,7 +91,11 @@ func installSystemdService(opts serviceInstallOptions) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	content, err := systemdUnitContents(currentBinaryPath(), opts)
+	workingDir, err := serviceInstallWorkingDirectory(opts)
+	if err != nil {
+		return "", err
+	}
+	content, err := systemdUnitContents(currentBinaryPath(), opts, workingDir)
 	if err != nil {
 		return "", err
 	}
@@ -122,7 +128,11 @@ func installLaunchdService(opts serviceInstallOptions) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(launchdLogPath()), 0o755); err != nil {
 		return "", err
 	}
-	content, err := launchdPlistContents(currentBinaryPath(), opts)
+	workingDir, err := serviceInstallWorkingDirectory(opts)
+	if err != nil {
+		return "", err
+	}
+	content, err := launchdPlistContents(currentBinaryPath(), opts, workingDir)
 	if err != nil {
 		return "", err
 	}
@@ -162,18 +172,30 @@ func currentBinaryPath() string {
 	return ""
 }
 
+func serviceInstallWorkingDirectory(opts serviceInstallOptions) (string, error) {
+	if strings.TrimSpace(opts.cwd) != "" {
+		return resolveOrCreateDir(opts.cwd)
+	}
+	cfg, err := store.LoadConfig()
+	if err == nil {
+		return configuredOrPlatformDefaultCWD(cfg)
+	}
+	path, err := platformDefaultWorkspaceDir()
+	if err != nil {
+		return "", err
+	}
+	return resolveOrCreateDir(path)
+}
+
 func serviceCommandArgs(opts serviceInstallOptions) []string {
 	args := []string{"serve"}
-	if opts.cwd != "" {
-		args = append(args, "--cwd", opts.cwd)
-	}
 	if opts.transport != "" {
 		args = append(args, "--transport", opts.transport)
 	}
 	return args
 }
 
-func systemdUnitContents(binaryPath string, opts serviceInstallOptions) (string, error) {
+func systemdUnitContents(binaryPath string, opts serviceInstallOptions, workingDir string) (string, error) {
 	args := append([]string{binaryPath}, serviceCommandArgs(opts)...)
 	var quoted []string
 	for _, arg := range args {
@@ -185,6 +207,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+WorkingDirectory=` + quoteSystemdArg(workingDir) + `
 ExecStart=` + strings.Join(quoted, " ") + `
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
@@ -201,7 +224,7 @@ WantedBy=default.target
 	return unit, nil
 }
 
-func launchdPlistContents(binaryPath string, opts serviceInstallOptions) (string, error) {
+func launchdPlistContents(binaryPath string, opts serviceInstallOptions, workingDir string) (string, error) {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
@@ -214,10 +237,8 @@ func launchdPlistContents(binaryPath string, opts serviceInstallOptions) (string
 		b.WriteString(`    <string>` + xmlEscape(arg) + `</string>` + "\n")
 	}
 	b.WriteString("  </array>\n")
-	if opts.cwd != "" {
-		b.WriteString(`  <key>WorkingDirectory</key>` + "\n")
-		b.WriteString(`  <string>` + xmlEscape(opts.cwd) + `</string>` + "\n")
-	}
+	b.WriteString(`  <key>WorkingDirectory</key>` + "\n")
+	b.WriteString(`  <string>` + xmlEscape(workingDir) + `</string>` + "\n")
 	logPath := launchdLogPath()
 	env := serviceEnvironment()
 	b.WriteString(`  <key>RunAtLoad</key>` + "\n  <true/>\n")

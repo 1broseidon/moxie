@@ -303,6 +303,16 @@ func cmdInit() {
 		fatal("chat ID cannot be zero")
 	}
 
+	defaultWorkspace, err := platformDefaultWorkspaceDir()
+	if err != nil {
+		fatal("failed to determine default workspace: %v", err)
+	}
+	workspaceInput := promptLine(reader, fmt.Sprintf("Default workspace [%s]: ", defaultWorkspace), defaultWorkspace)
+	defaultCWD, err := resolveOrCreateDir(workspaceInput)
+	if err != nil {
+		fatal("invalid default workspace: %v", err)
+	}
+
 	cfg := store.Config{
 		Channels: map[string]store.ChannelConfig{
 			"telegram": {
@@ -312,10 +322,12 @@ func cmdInit() {
 			},
 		},
 		Workspaces: map[string]string{},
+		DefaultCWD: defaultCWD,
 	}
 	store.SaveConfig(cfg)
 	path := store.ConfigFile("config.json")
 	fmt.Printf("Config saved to %s\n", path)
+	fmt.Printf("Default workspace: %s\n", defaultCWD)
 
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return
@@ -324,14 +336,7 @@ func cmdInit() {
 		return
 	}
 
-	defaultCWD, err := os.Getwd()
-	if err != nil {
-		defaultCWD = ""
-	}
-	cwd := promptLine(reader, fmt.Sprintf("Service working directory [%s]: ", defaultCWD), defaultCWD)
-
-	opts := serviceInstallOptions{cwd: cwd}
-	path, err = installService(opts)
+	path, err = installService(serviceInstallOptions{})
 	if err != nil {
 		fatal("service install failed: %v", err)
 	}
@@ -1626,17 +1631,9 @@ func runServeSupervisor(ctx context.Context, transports []serveTransportRuntime)
 
 func cmdServe() {
 	flags := parseServeTransportAndCWD()
-	defaultCWD := flags.cwd
-	if defaultCWD != "" {
-		var err error
-		defaultCWD, err = resolveDir(defaultCWD)
-		if err != nil {
-			fatal("invalid --cwd: %v", err)
-		}
-	}
 
 	for {
-		action, err := runServeOnce(flags.transport, defaultCWD)
+		action, err := runServeOnce(flags.transport, flags.cwd)
 		if action == serveSignalReload {
 			if err != nil {
 				log.Printf("reload completed after transport stop: %v", err)
@@ -1651,10 +1648,15 @@ func cmdServe() {
 	}
 }
 
-func runServeOnce(requestedTransport, defaultCWD string) (serveSignalAction, error) {
+func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, error) {
 	cfg, err := store.LoadConfig()
 	if err != nil {
 		return serveSignalNone, err
+	}
+
+	defaultCWD, err := resolveServeDefaultCWD(cfg, requestedCWD)
+	if err != nil {
+		return serveSignalNone, fmt.Errorf("resolve default workspace: %w", err)
 	}
 
 	backends, err := loadServeBackends()

@@ -1,6 +1,6 @@
 # Backends
 
-Moxie dispatches messages to agent CLIs via [oneagent](https://github.com/1broseidon/oneagent). Any agent CLI that oneagent supports works with Moxie — no code changes needed.
+Moxie dispatches messages to supported agent CLIs like Claude, Codex, Gemini, Pi, and OpenCode.
 
 ## Supported backends
 
@@ -12,13 +12,15 @@ Moxie dispatches messages to agent CLIs via [oneagent](https://github.com/1brose
 | Pi | `pi` | `npm install -g @anthropics/pi` | Multi-model routing |
 | OpenCode | `opencode` | See [opencode.ai](https://opencode.ai) | |
 
-Check which backends are available on your system:
+After installing a backend CLI, make sure it is on your `PATH`:
 
 ```bash
-oa list
+command -v claude
+command -v codex
+command -v gemini
+command -v pi
+command -v opencode
 ```
-
-This shows all configured backends and whether their CLI binary is found.
 
 ## Switching backends
 
@@ -57,10 +59,10 @@ The agent runs in a working directory you control:
 moxie serve --cwd /home/user/projects/myapp
 ```
 
-Or switch in chat:
+Or switch in chat to a named workspace:
 
 ```
-/cwd /path/to/project
+/cwd myapp
 ```
 
 ### Named workspaces
@@ -80,7 +82,7 @@ Then switch by name: `/cwd myapp`
 
 ## Custom backend config
 
-Moxie loads oneagent's embedded defaults for all supported backends and applies overrides from `~/.config/moxie/backends.json`. To override settings or add new backends, create:
+Moxie loads built-in defaults for supported backends and applies overrides from `~/.config/moxie/backends.json`. To override settings or add new backends, create:
 
 ```json
 {
@@ -96,4 +98,4 @@ Moxie loads oneagent's embedded defaults for all supported backends and applies 
 }
 ```
 
-User overrides are merged on top of embedded defaults. See the [oneagent documentation](https://github.com/1broseidon/oneagent) for the full backend configuration schema.
+User overrides are merged on top of embedded defaults.

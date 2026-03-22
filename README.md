@@ -2,7 +2,7 @@
 
 Chat agent service that connects Telegram and Slack to AI coding agents. Send a message from your phone, get a response from Claude, Codex, Gemini, Pi, or any other configured backend.
 
-Moxie runs as an always-on service. Messages are dispatched to agent backends via [oneagent](https://github.com/1broseidon/oneagent), which handles the CLI invocation, output parsing, and thread management for each backend.
+Moxie runs as an always-on service. Messages are dispatched to the configured agent backend CLI and the result is delivered back to Telegram or Slack.
 
 ## Install
 
@@ -14,29 +14,38 @@ Requires Go 1.24+ and at least one agent CLI installed (see [Agent backends](#ag
 
 ## Quick start (Telegram)
 
-The fastest way to get running:
+The recommended path is to let Moxie install itself as a background service during init.
 
 1. **Create a Telegram bot** — open [BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
 
 2. **Get your chat ID** — send any message to your new bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser. Find `"chat":{"id":123456}` in the response.
 
-3. **Configure and run:**
+3. **Configure Moxie:**
 
 ```bash
 moxie init
 # Paste your bot token and chat ID when prompted
-# Optionally let init install and start the background service
+# Choose a default workspace path
+# Say yes to install and start the background service
 ```
 
-4. **If you skipped service install during init, start Moxie manually:**
+4. **Verify the service if needed:**
+
+```bash
+moxie service status
+```
+
+5. **If you skipped service install during init, run Moxie manually instead:**
 
 ```bash
 moxie serve
 ```
 
-5. **Send a message** to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
+6. **Send a message** to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
 
 That's it. Use `/model codex` or `/model gemini` in the chat to switch backends.
+
+For most users, the service-first setup is the best default. Use foreground `moxie serve` mainly when you intentionally want Moxie tied to the current project directory in your shell.
 
 For Slack setup or advanced configuration, see below.
 
@@ -140,15 +149,23 @@ Workspaces let you switch the agent's working directory with `/cwd`:
   "workspaces": {
     "myapp": "/home/user/projects/myapp",
     "ops": "/home/user/projects/ops"
-  }
+  },
+  "default_cwd": "/home/user/.local/share/moxie/workspace"
 }
 ```
 
 Then in chat: `/cwd myapp` switches the agent to that directory.
 
+You can also set a global fallback workspace with `default_cwd`. When no conversation-specific `/cwd` is active, Moxie uses:
+
+- the explicit `--cwd` passed to `moxie serve`, if any
+- otherwise the current shell directory for foreground `moxie serve`
+- otherwise `default_cwd`
+- otherwise the platform default workspace
+
 ## Agent backends
 
-Moxie dispatches to whatever agent CLIs you have installed. Backend definitions use the [oneagent](https://github.com/1broseidon/oneagent) schema, with embedded defaults plus Moxie-specific overrides in `~/.config/moxie/backends.json`.
+Moxie dispatches to whichever supported agent CLIs you have installed. It ships with built-in backend definitions and lets you override them in `~/.config/moxie/backends.json`.
 
 ### Supported backends
 
@@ -160,10 +177,14 @@ Moxie dispatches to whatever agent CLIs you have installed. Backend definitions 
 | Pi | `pi` | `npm install -g @anthropics/pi` |
 | OpenCode | `opencode` | See [opencode.ai](https://opencode.ai) |
 
-Check which backends are available:
+After installing a backend CLI, make sure it is on your `PATH`:
 
 ```bash
-oa list
+command -v claude
+command -v codex
+command -v gemini
+command -v pi
+command -v opencode
 ```
 
 ### Switching backends
@@ -193,7 +214,7 @@ For backends that support reasoning effort (Claude, Codex, Pi):
 
 ### Custom backend config
 
-Moxie loads oneagent's embedded backend defaults and applies overrides from `~/.config/moxie/backends.json`. To override or add backends, create:
+Moxie loads its built-in backend defaults and applies overrides from `~/.config/moxie/backends.json`. To override or add backends, create:
 
 ```json
 {
@@ -203,7 +224,7 @@ Moxie loads oneagent's embedded backend defaults and applies overrides from `~/.
 }
 ```
 
-User overrides are merged on top of the embedded defaults. See the [oneagent docs](https://github.com/1broseidon/oneagent) for the full backend schema.
+User overrides are merged on top of the embedded defaults.
 
 ## Running as a service
 
@@ -216,7 +237,8 @@ Create `~/.config/systemd/user/moxie-serve.service` yourself, or let `moxie init
 Description=Moxie chat agent
 
 [Service]
-ExecStart=%h/go/bin/moxie serve --cwd %h/projects/default
+WorkingDirectory=%h/.local/share/moxie/workspace
+ExecStart=%h/go/bin/moxie serve
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
@@ -261,8 +283,6 @@ Create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist` yourself, or le
   <array>
     <string>/opt/homebrew/bin/moxie</string>
     <string>serve</string>
-    <string>--cwd</string>
-    <string>/Users/you/projects/default</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/you/projects/default</string>
@@ -280,7 +300,7 @@ Create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist` yourself, or le
 
 Replace the binary path with your actual `moxie` install path.
 
-If you use `moxie service install`, Moxie will also capture the current `PATH` and `HOME` into the LaunchAgent so backend CLIs like `claude` and `codex` remain available when running as a service.
+If you use `moxie service install`, Moxie will also capture the current `PATH` and `HOME` into the LaunchAgent so backend CLIs like `claude` and `codex` remain available when running as a service. Its working directory comes from `--cwd`, otherwise `default_cwd`, otherwise the platform workspace default.
 
 Then use:
 
@@ -300,7 +320,7 @@ moxie serve [--cwd <dir>] [--transport <telegram|slack>]
 
 | Flag | Description |
 |------|-------------|
-| `--cwd` | Default working directory for agent backends |
+| `--cwd` | Explicit working directory override. Without it, `moxie serve` prefers the current shell directory, then `default_cwd`, then the platform workspace default. |
 | `--transport` | Run only one transport instead of both |
 
 ## Chat commands
@@ -312,7 +332,7 @@ Commands available in Telegram and Slack:
 | `/new [backend] [workspace]` | Start a new conversation thread |
 | `/model [backend] [model]` | Show or switch the agent backend |
 | `/think [off\|low\|medium\|high]` | Show or set thinking/reasoning effort |
-| `/cwd [name\|path]` | Show or switch working directory |
+| `/cwd [name]` | Show the current directory or switch to a named workspace |
 | `/threads [name]` | List or switch threads |
 | `/compact` | Compact the current thread |
 

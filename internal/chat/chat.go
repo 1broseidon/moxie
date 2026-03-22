@@ -84,7 +84,7 @@ func HandleInbound(msg InboundMessage, cfg Settings, defaultCWD string, st store
 		if !isSupportedCommand(base) {
 			return HandleResult{ImmediateReply: "Unknown command. Try /new, /model, /cwd, /threads, or /compact."}
 		}
-		return HandleResult{ImmediateReply: HandleCommand(msg.Conversation.ID(), text, client, cfg)}
+		return HandleResult{ImmediateReply: HandleCommand(msg.Conversation.ID(), text, client, cfg, defaultCWD)}
 	}
 
 	prompt := strings.TrimSpace(msg.Prompt)
@@ -114,13 +114,13 @@ func HandleInbound(msg InboundMessage, cfg Settings, defaultCWD string, st store
 	}
 }
 
-func HandleCommand(conversationID, text string, client *oneagent.Client, cfg Settings) string {
+func HandleCommand(conversationID, text string, client *oneagent.Client, cfg Settings, defaultCWD string) string {
 	base, arg := parseCommand(text)
 	st := store.ReadConversationState(conversationID)
 
 	switch base {
 	case "new":
-		return handleNew(conversationID, arg, st, client, cfg)
+		return handleNew(conversationID, arg, st, client, cfg, defaultCWD)
 	case "model":
 		if arg == "" {
 			b := client.Backends[st.Backend]
@@ -134,7 +134,7 @@ func HandleCommand(conversationID, text string, client *oneagent.Client, cfg Set
 	case "think":
 		return handleThinking(conversationID, arg, st)
 	case "cwd":
-		return handleCWD(conversationID, arg, st, cfg, client)
+		return handleCWD(conversationID, arg, st, cfg, client, defaultCWD)
 	case "threads":
 		return handleThreads(conversationID, arg, st, client)
 	case "compact":
@@ -168,7 +168,7 @@ func isSupportedCommand(name string) bool {
 	}
 }
 
-func handleNew(conversationID, arg string, st store.State, client *oneagent.Client, cfg Settings) string {
+func handleNew(conversationID, arg string, st store.State, client *oneagent.Client, cfg Settings, defaultCWD string) string {
 	for _, word := range strings.Fields(arg) {
 		if _, ok := client.Backends[word]; ok {
 			st.Backend = word
@@ -199,7 +199,10 @@ func handleNew(conversationID, arg string, st store.State, client *oneagent.Clie
 	store.WriteConversationState(conversationID, st)
 	cwd := st.CWD
 	if cwd == "" {
-		cwd = "(default)"
+		cwd = defaultCWD
+		if cwd == "" {
+			cwd = "(default workspace)"
+		}
 	}
 	return fmt.Sprintf("New %s session in %s.", st.Backend, cwd)
 }
@@ -241,11 +244,14 @@ func resetNativeSession(client *oneagent.Client, st store.State) {
 	}
 }
 
-func handleCWD(conversationID, arg string, st store.State, cfg Settings, client *oneagent.Client) string {
+func handleCWD(conversationID, arg string, st store.State, cfg Settings, client *oneagent.Client, defaultCWD string) string {
 	if arg == "" {
 		cwd := st.CWD
 		if cwd == "" {
-			cwd = "(default from --cwd flag)"
+			cwd = defaultCWD
+			if cwd == "" {
+				cwd = "(default workspace)"
+			}
 		}
 		var buf strings.Builder
 		fmt.Fprintf(&buf, "CWD: %s\n\nWorkspaces:\n", cwd)
