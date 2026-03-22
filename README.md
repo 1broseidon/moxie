@@ -280,6 +280,8 @@ Create `~/Library/LaunchAgents/io.github.1broseidon.moxie.plist` yourself, or le
 
 Replace the binary path with your actual `moxie` install path.
 
+If you use `moxie service install`, Moxie will also capture the current `PATH` and `HOME` into the LaunchAgent so backend CLIs like `claude` and `codex` remain available when running as a service.
+
 Then use:
 
 ```bash

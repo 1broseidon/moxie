@@ -127,3 +127,5 @@ moxie service restart
 moxie service reload
 moxie service status
 ```
+
+When generated via `moxie service install`, the LaunchAgent also captures the current `PATH` and `HOME` so backend CLIs remain available outside your interactive shell session.

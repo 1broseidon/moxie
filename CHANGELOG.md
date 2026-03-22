@@ -2,6 +2,12 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.1.8] - 2026-03-22
+
+### Fixed
+
+- LaunchAgent installs now capture `PATH` and `HOME` so backend CLIs remain available when Moxie runs under `launchd`
+
 ## [0.1.7] - 2026-03-21
 
 ### Fixed

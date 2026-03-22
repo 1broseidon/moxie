@@ -38,6 +38,9 @@ func TestSystemdUnitContentsIncludesExecStartAndReload(t *testing.T) {
 }
 
 func TestLaunchdPlistContentsIncludesLabelArgsAndLogs(t *testing.T) {
+	t.Setenv("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+	t.Setenv("HOME", "/Users/you")
+
 	plist, err := launchdPlistContents("/opt/homebrew/bin/moxie", serviceInstallOptions{
 		cwd:       "/Users/you/projects/default",
 		transport: "slack",
@@ -54,6 +57,11 @@ func TestLaunchdPlistContentsIncludesLabelArgsAndLogs(t *testing.T) {
 		"<string>--transport</string>",
 		"<string>slack</string>",
 		"<key>KeepAlive</key>",
+		"<key>EnvironmentVariables</key>",
+		"<key>PATH</key>",
+		"<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>",
+		"<key>HOME</key>",
+		"<string>/Users/you</string>",
 		"<key>StandardOutPath</key>",
 		"<key>StandardErrorPath</key>",
 	} {

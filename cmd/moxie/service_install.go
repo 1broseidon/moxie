@@ -219,8 +219,19 @@ func launchdPlistContents(binaryPath string, opts serviceInstallOptions) (string
 		b.WriteString(`  <string>` + xmlEscape(opts.cwd) + `</string>` + "\n")
 	}
 	logPath := launchdLogPath()
+	env := serviceEnvironment()
 	b.WriteString(`  <key>RunAtLoad</key>` + "\n  <true/>\n")
 	b.WriteString(`  <key>KeepAlive</key>` + "\n  <true/>\n")
+	b.WriteString(`  <key>EnvironmentVariables</key>` + "\n")
+	b.WriteString("  <dict>\n")
+	for _, key := range []string{"PATH", "HOME"} {
+		if env[key] == "" {
+			continue
+		}
+		b.WriteString(`    <key>` + key + `</key>` + "\n")
+		b.WriteString(`    <string>` + xmlEscape(env[key]) + `</string>` + "\n")
+	}
+	b.WriteString("  </dict>\n")
 	b.WriteString(`  <key>StandardOutPath</key>` + "\n")
 	b.WriteString(`  <string>` + xmlEscape(logPath) + `</string>` + "\n")
 	b.WriteString(`  <key>StandardErrorPath</key>` + "\n")
@@ -235,6 +246,17 @@ func launchdLogPath() string {
 		fatal("resolve home dir: %v", err)
 	}
 	return filepath.Join(home, "Library", "Logs", "moxie.log")
+}
+
+func serviceEnvironment() map[string]string {
+	env := map[string]string{
+		"PATH": os.Getenv("PATH"),
+		"HOME": os.Getenv("HOME"),
+	}
+	if strings.TrimSpace(env["PATH"]) == "" {
+		env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+	}
+	return env
 }
 
 func xmlEscape(s string) string {
