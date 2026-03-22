@@ -13,5 +13,3 @@ require (
 )
 
 require github.com/gorilla/websocket v1.5.3 // indirect
-
-replace github.com/1broseidon/oneagent => ../oneagent
