@@ -1,6 +1,9 @@
 package scheduler
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -137,5 +140,39 @@ func TestLaunchdSchedulePlistContentsUsesScheduleFireEntrypoint(t *testing.T) {
 		if !strings.Contains(plist, needle) {
 			t.Fatalf("plist missing %q: %s", needle, plist)
 		}
+	}
+}
+
+func TestLaunchdRemoveSucceedsWhenBootoutFails(t *testing.T) {
+	dir := t.TempDir()
+	plistDir := filepath.Join(dir, "Library", "LaunchAgents")
+	if err := os.MkdirAll(plistDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	schedID := "sch-oneshot-1"
+	plistPath := launchdSchedulePlistPath(dir, schedID)
+	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &launchdBackend{
+		homeDir: func() (string, error) { return dir, nil },
+		uid:     func() int { return 501 },
+		runCommand: func(name string, args ...string) ([]byte, error) {
+			if name == "launchctl" && len(args) > 0 && args[0] == "print" {
+				return []byte("service info"), nil
+			}
+			if name == "launchctl" && len(args) > 0 && args[0] == "bootout" {
+				return nil, fmt.Errorf("exit status 3")
+			}
+			return nil, nil
+		},
+	}
+
+	if err := backend.Remove(schedID); err != nil {
+		t.Fatalf("Remove() should succeed even when bootout fails: %v", err)
+	}
+	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
+		t.Fatal("plist file should be removed after Remove()")
 	}
 }

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"encoding/xml"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -83,8 +84,12 @@ func (b *launchdBackend) Remove(id string) error {
 	path := launchdSchedulePlistPath(home, id)
 	label := launchdScheduleLabel(id)
 	if b.loaded(label) {
+		// bootout may fail when called from the launchd-spawned fire process
+		// (the process cannot unload its own service). This is expected for
+		// one-shot schedules cleaning up after themselves. Removing the plist
+		// file is the important part — launchd drops the job on next reload.
 		if _, err := b.runCommand("launchctl", "bootout", launchdDomainTarget(b.uid()), path); err != nil {
-			return fmt.Errorf("launchctl bootout %s: %w", path, err)
+			log.Printf("launchctl bootout %s (non-fatal): %v", label, err)
 		}
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

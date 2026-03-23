@@ -2,6 +2,16 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.4] - 2026-03-23
+
+### Changed
+
+- System prompts now mention `moxie service` and warn against running `moxie serve` directly to prevent duplicate processes
+
+### Fixed
+
+- macOS launchd one-shot cleanup: `launchctl bootout` failure no longer prevents plist removal and schedule store cleanup when the fire process is the launchd job itself
+
 ## [0.2.3] - 2026-03-23
 
 ### Changed
