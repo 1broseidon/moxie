@@ -30,6 +30,28 @@ Today that means recurring schedules still run through Moxie's portable schedule
 
 Use `--in` for a one-time relative reminder and `--every` for a repeating elapsed-time interval.
 
+## Portable cron subset
+
+`--cron` accepts the common portable 5-field form:
+
+```text
+minute hour day-of-month month day-of-week
+```
+
+Supported portable forms:
+- exact values like `0 9 * * 1`
+- wildcards like `*`
+- safe lists and ranges like `1,3,5` or `MON-FRI`
+- named months/days such as `JAN` or `MON`
+- safe descriptors that normalize into the portable form, such as `@daily`
+
+Notably rejected:
+- step expressions like `*/5`
+- specials like `?`, `L`, `W`, `#`, and `@reboot`
+- cron expressions that restrict both day-of-month and day-of-week at the same time
+
+Moxie preserves the original cron string for display, while normalizing it internally into the canonical calendar fields used by the scheduler.
+
 ## Examples
 
 ### Reminder in 5 minutes

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -788,6 +789,165 @@ func parseEvery(raw string) (time.Duration, error) {
 	return d, nil
 }
 
+type calendarFieldSpec struct {
+	name             string
+	min              int
+	max              int
+	aliases          map[string]int
+	allowSundaySeven bool
+}
+
+var (
+	calendarMinuteField = calendarFieldSpec{name: "minute", min: 0, max: 59}
+	calendarHourField   = calendarFieldSpec{name: "hour", min: 0, max: 23}
+	calendarDOMField    = calendarFieldSpec{name: "day_of_month", min: 1, max: 31}
+	calendarMonthField  = calendarFieldSpec{
+		name: "month",
+		min:  1,
+		max:  12,
+		aliases: map[string]int{
+			"JAN": 1,
+			"FEB": 2,
+			"MAR": 3,
+			"APR": 4,
+			"MAY": 5,
+			"JUN": 6,
+			"JUL": 7,
+			"AUG": 8,
+			"SEP": 9,
+			"OCT": 10,
+			"NOV": 11,
+			"DEC": 12,
+		},
+	}
+	calendarDOWField = calendarFieldSpec{
+		name:             "day_of_week",
+		min:              0,
+		max:              6,
+		allowSundaySeven: true,
+		aliases: map[string]int{
+			"SUN": 0,
+			"MON": 1,
+			"TUE": 2,
+			"WED": 3,
+			"THU": 4,
+			"FRI": 5,
+			"SAT": 6,
+		},
+	}
+)
+
+func normalizeCalendarFields(minute, hour, dayOfMonth, month, dayOfWeek string) (*CalendarSpec, error) {
+	normalizedMinute, err := normalizeCalendarField(minute, calendarMinuteField)
+	if err != nil {
+		return nil, err
+	}
+	normalizedHour, err := normalizeCalendarField(hour, calendarHourField)
+	if err != nil {
+		return nil, err
+	}
+	normalizedDayOfMonth, err := normalizeCalendarField(dayOfMonth, calendarDOMField)
+	if err != nil {
+		return nil, err
+	}
+	normalizedMonth, err := normalizeCalendarField(month, calendarMonthField)
+	if err != nil {
+		return nil, err
+	}
+	normalizedDayOfWeek, err := normalizeCalendarField(dayOfWeek, calendarDOWField)
+	if err != nil {
+		return nil, err
+	}
+	if normalizedDayOfMonth != "*" && normalizedDayOfWeek != "*" {
+		return nil, fmt.Errorf("cron spec cannot restrict both day_of_month and day_of_week in portable calendar mode")
+	}
+	calendar := &CalendarSpec{
+		Minute:     normalizedMinute,
+		Hour:       normalizedHour,
+		DayOfMonth: normalizedDayOfMonth,
+		Month:      normalizedMonth,
+		DayOfWeek:  normalizedDayOfWeek,
+	}
+	if err := validateCalendar(calendar); err != nil {
+		return nil, err
+	}
+	return calendar, nil
+}
+
+func normalizeCalendarField(raw string, spec calendarFieldSpec) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("%s cannot be empty", spec.name)
+	}
+	parts := strings.Split(raw, ",")
+	normalizedParts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return "", fmt.Errorf("invalid %s field %q", spec.name, raw)
+		}
+		if strings.ContainsAny(part, " \t\n\r") {
+			return "", fmt.Errorf("invalid %s field %q", spec.name, raw)
+		}
+		if part == "*" {
+			if len(parts) > 1 {
+				return "", fmt.Errorf("invalid %s field %q", spec.name, raw)
+			}
+			normalizedParts = append(normalizedParts, part)
+			continue
+		}
+		if strings.Contains(part, "/") {
+			return "", fmt.Errorf("%s step expressions are not supported in portable cron", spec.name)
+		}
+		if strings.Contains(part, "-") {
+			bounds := strings.SplitN(part, "-", 2)
+			start, err := parseCalendarFieldValue(bounds[0], spec, false)
+			if err != nil {
+				return "", err
+			}
+			end, err := parseCalendarFieldValue(bounds[1], spec, false)
+			if err != nil {
+				return "", err
+			}
+			if start > end {
+				return "", fmt.Errorf("invalid %s range %q", spec.name, part)
+			}
+			normalizedParts = append(normalizedParts, fmt.Sprintf("%d-%d", start, end))
+			continue
+		}
+		value, err := parseCalendarFieldValue(part, spec, true)
+		if err != nil {
+			return "", err
+		}
+		normalizedParts = append(normalizedParts, strconv.Itoa(value))
+	}
+	return strings.Join(normalizedParts, ","), nil
+}
+
+func parseCalendarFieldValue(raw string, spec calendarFieldSpec, allowSundaySeven bool) (int, error) {
+	token := strings.ToUpper(strings.TrimSpace(raw))
+	if token == "" {
+		return 0, fmt.Errorf("invalid %s field %q", spec.name, raw)
+	}
+	if value, ok := spec.aliases[token]; ok {
+		return value, nil
+	}
+	value, err := strconv.Atoi(token)
+	if err != nil {
+		return 0, fmt.Errorf("unsupported %s value %q in portable cron", spec.name, raw)
+	}
+	if spec.allowSundaySeven && value == 7 {
+		if !allowSundaySeven {
+			return 0, fmt.Errorf("day_of_week ranges using 7 are not supported in portable cron")
+		}
+		value = 0
+	}
+	if value < spec.min || value > spec.max {
+		return 0, fmt.Errorf("%s value %q out of range", spec.name, raw)
+	}
+	return value, nil
+}
+
 func resolveCalendar(rawCron string, calendar *CalendarSpec, now time.Time, loc *time.Location) (*CalendarSpec, time.Time, error) {
 	switch {
 	case rawCron != "" && calendar != nil:
@@ -830,17 +990,11 @@ func parseCronCalendar(raw string) (*CalendarSpec, error) {
 	if len(parts) != 5 {
 		return nil, fmt.Errorf("cron spec must have 5 fields")
 	}
-	calendar := &CalendarSpec{
-		Minute:     parts[0],
-		Hour:       parts[1],
-		DayOfMonth: parts[2],
-		Month:      parts[3],
-		DayOfWeek:  parts[4],
-		Cron:       raw,
-	}
-	if err := validateCalendar(calendar); err != nil {
+	calendar, err := normalizeCalendarFields(parts[0], parts[1], parts[2], parts[3], parts[4])
+	if err != nil {
 		return nil, err
 	}
+	calendar.Cron = raw
 	return calendar, nil
 }
 
@@ -852,26 +1006,26 @@ func normalizeCalendar(calendar *CalendarSpec, legacyCron string) (*CalendarSpec
 		return parseCronCalendar(legacyCron)
 	}
 
-	normalized := &CalendarSpec{
-		Minute:     strings.TrimSpace(calendar.Minute),
-		Hour:       strings.TrimSpace(calendar.Hour),
-		DayOfMonth: strings.TrimSpace(calendar.DayOfMonth),
-		Month:      strings.TrimSpace(calendar.Month),
-		DayOfWeek:  strings.TrimSpace(calendar.DayOfWeek),
-		Cron:       strings.TrimSpace(calendar.Cron),
+	rawCron := strings.TrimSpace(calendar.Cron)
+	if rawCron == "" && strings.TrimSpace(legacyCron) != "" {
+		rawCron = strings.TrimSpace(legacyCron)
 	}
-	if normalized.Cron == "" && strings.TrimSpace(legacyCron) != "" {
-		normalized.Cron = strings.TrimSpace(legacyCron)
-	}
-	if normalized.Minute == "" || normalized.Hour == "" || normalized.DayOfMonth == "" || normalized.Month == "" || normalized.DayOfWeek == "" {
-		if normalized.Cron == "" {
+	minute := strings.TrimSpace(calendar.Minute)
+	hour := strings.TrimSpace(calendar.Hour)
+	dayOfMonth := strings.TrimSpace(calendar.DayOfMonth)
+	month := strings.TrimSpace(calendar.Month)
+	dayOfWeek := strings.TrimSpace(calendar.DayOfWeek)
+	if minute == "" || hour == "" || dayOfMonth == "" || month == "" || dayOfWeek == "" {
+		if rawCron == "" {
 			return nil, fmt.Errorf("calendar spec requires minute, hour, day_of_month, month, and day_of_week")
 		}
-		return parseCronCalendar(normalized.Cron)
+		return parseCronCalendar(rawCron)
 	}
-	if err := validateCalendar(normalized); err != nil {
+	normalized, err := normalizeCalendarFields(minute, hour, dayOfMonth, month, dayOfWeek)
+	if err != nil {
 		return nil, err
 	}
+	normalized.Cron = rawCron
 	return normalized, nil
 }
 
@@ -889,7 +1043,8 @@ func validateCalendar(calendar *CalendarSpec) error {
 }
 
 func expandCronDescriptor(raw string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+	trimmed := strings.TrimSpace(raw)
+	switch strings.ToLower(trimmed) {
 	case "@yearly", "@annually":
 		return "0 0 1 1 *", nil
 	case "@monthly":
@@ -903,6 +1058,9 @@ func expandCronDescriptor(raw string) (string, error) {
 	case "@reboot":
 		return "", fmt.Errorf("cron descriptor @reboot is not supported")
 	default:
+		if strings.HasPrefix(trimmed, "@") {
+			return "", fmt.Errorf("cron descriptor %s is not supported", trimmed)
+		}
 		return raw, nil
 	}
 }

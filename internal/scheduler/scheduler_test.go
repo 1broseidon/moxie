@@ -419,6 +419,79 @@ func TestNextCronRunValidation(t *testing.T) {
 	}
 }
 
+func TestParseCronCalendarNormalizesPortableSubset(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantMinute string
+		wantHour   string
+		wantDOM    string
+		wantMonth  string
+		wantDOW    string
+	}{
+		{name: "basic five field", raw: "0 1 * * *", wantMinute: "0", wantHour: "1", wantDOM: "*", wantMonth: "*", wantDOW: "*"},
+		{name: "aliases and ranges", raw: "00 09 * JAN MON-FRI", wantMinute: "0", wantHour: "9", wantDOM: "*", wantMonth: "1", wantDOW: "1-5"},
+		{name: "safe descriptor", raw: "@daily", wantMinute: "0", wantHour: "0", wantDOM: "*", wantMonth: "*", wantDOW: "*"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calendar, err := parseCronCalendar(tt.raw)
+			if err != nil {
+				t.Fatalf("parseCronCalendar(%q): %v", tt.raw, err)
+			}
+			if calendar.Cron != tt.raw {
+				t.Fatalf("Cron = %q, want %q", calendar.Cron, tt.raw)
+			}
+			if calendar.Minute != tt.wantMinute || calendar.Hour != tt.wantHour || calendar.DayOfMonth != tt.wantDOM || calendar.Month != tt.wantMonth || calendar.DayOfWeek != tt.wantDOW {
+				t.Fatalf("calendar fields = %+v, want minute=%q hour=%q day_of_month=%q month=%q day_of_week=%q", calendar, tt.wantMinute, tt.wantHour, tt.wantDOM, tt.wantMonth, tt.wantDOW)
+			}
+		})
+	}
+}
+
+func TestParseCronCalendarRejectsUnsupportedPortableForms(t *testing.T) {
+	tests := []struct {
+		raw     string
+		wantErr string
+	}{
+		{raw: "*/5 * * * *", wantErr: "step expressions are not supported"},
+		{raw: "0 0 ? * *", wantErr: "unsupported day_of_month value"},
+		{raw: "0 0 L * *", wantErr: "unsupported day_of_month value"},
+		{raw: "0 0 1 * MON", wantErr: "cannot restrict both day_of_month and day_of_week"},
+		{raw: "@reboot", wantErr: "@reboot is not supported"},
+		{raw: "@every 5m", wantErr: "descriptor @every 5m is not supported"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			if _, err := parseCronCalendar(tt.raw); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parseCronCalendar(%q) err = %v, want substring %q", tt.raw, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNormalizeCalendarCanonicalizesStructuredFields(t *testing.T) {
+	calendar, err := normalizeCalendar(&CalendarSpec{
+		Minute:     "00",
+		Hour:       "09",
+		DayOfMonth: "*",
+		Month:      "JAN,MAR",
+		DayOfWeek:  "MON-FRI",
+		Cron:       "0 9 * JAN,MAR MON-FRI",
+	}, "")
+	if err != nil {
+		t.Fatalf("normalizeCalendar(): %v", err)
+	}
+	if calendar.Cron != "0 9 * JAN,MAR MON-FRI" {
+		t.Fatalf("Cron = %q, want %q", calendar.Cron, "0 9 * JAN,MAR MON-FRI")
+	}
+	if calendar.CronSpec() != "0 9 * 1,3 1-5" {
+		t.Fatalf("CronSpec() = %q, want %q", calendar.CronSpec(), "0 9 * 1,3 1-5")
+	}
+}
+
 func TestLoadUpgradesLegacyCronSchedule(t *testing.T) {
 	store := testStore(t)
 	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
@@ -551,6 +624,38 @@ func TestAddPersistsCanonicalCalendarRepresentation(t *testing.T) {
 	}
 	for _, key := range []string{"trigger", "at", "interval", "calendar", "cron", "managed_by", "sync_state", "sync_error"} {
 		expectMissingKey(t, stored, key)
+	}
+}
+
+func TestAddPersistsCanonicalizedCronFields(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	if _, err := store.Add(AddInput{
+		Trigger: TriggerCron,
+		Action:  ActionDispatch,
+		Cron:    "00 09 * JAN MON-FRI",
+		Text:    "Run weekday report",
+		Now:     now,
+	}); err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+
+	stored := readStoredScheduleRecord(t, store.path)
+	spec := decodeRawObject(t, stored["spec"], "stored spec")
+	calendar := decodeRawObject(t, spec["calendar"], "stored calendar")
+	checks := map[string]string{
+		"minute":       "0",
+		"hour":         "9",
+		"day_of_month": "*",
+		"month":        "1",
+		"day_of_week":  "1-5",
+		"cron":         "00 09 * JAN MON-FRI",
+	}
+	for key, want := range checks {
+		if got := strings.Trim(string(calendar[key]), `"`); got != want {
+			t.Fatalf("stored calendar %s = %q, want %q", key, got, want)
+		}
 	}
 }
 
