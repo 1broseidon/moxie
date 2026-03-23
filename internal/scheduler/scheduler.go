@@ -123,9 +123,10 @@ type AddInput struct {
 }
 
 type Store struct {
-	path string
-	loc  *time.Location
-	mu   sync.Mutex
+	path     string
+	loc      *time.Location
+	mu       sync.Mutex
+	backends *backendReconciler
 }
 
 type fileData struct {
@@ -253,10 +254,17 @@ func (sc *Schedule) UnmarshalJSON(data []byte) error {
 }
 
 func NewStore(path string, loc *time.Location) *Store {
+	return newStoreWithBackends(path, loc, defaultBackendReconciler())
+}
+
+func newStoreWithBackends(path string, loc *time.Location, backends *backendReconciler) *Store {
 	if loc == nil {
 		loc = time.Local
 	}
-	return &Store{path: path, loc: loc}
+	if backends == nil {
+		backends = defaultBackendReconciler()
+	}
+	return &Store{path: path, loc: loc, backends: backends}
 }
 
 func (s *Store) Add(input AddInput) (Schedule, error) {
@@ -274,6 +282,10 @@ func (s *Store) Add(input AddInput) (Schedule, error) {
 	}
 
 	sc, err := s.buildSchedule(input, now)
+	if err != nil {
+		return Schedule{}, err
+	}
+	sc, err = s.backends.Materialize(sc)
 	if err != nil {
 		return Schedule{}, err
 	}
@@ -324,18 +336,23 @@ func (s *Store) Delete(id string) error {
 	}
 	next := schedules[:0]
 	found := false
+	var removed Schedule
 	for _, sc := range schedules {
 		if sc.ID == id {
 			if sc.RunningJobID != "" {
 				return fmt.Errorf("schedule %s is running via job %s", id, sc.RunningJobID)
 			}
 			found = true
+			removed = sc
 			continue
 		}
 		next = append(next, sc)
 	}
 	if !found {
 		return os.ErrNotExist
+	}
+	if err := s.backends.Remove(removed); err != nil {
+		return err
 	}
 	return s.save(next)
 }
@@ -416,6 +433,9 @@ func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, erro
 		sc.LastRun = finishedAt
 		if sc.Spec.Trigger == TriggerAt {
 			next := append(schedules[:i:i], schedules[i+1:]...)
+			if err := s.backends.Remove(sc); err != nil {
+				return Schedule{}, err
+			}
 			if err := s.save(next); err != nil {
 				return Schedule{}, err
 			}
@@ -492,10 +512,6 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 		ThreadID:       strings.TrimSpace(input.ThreadID),
 		CWD:            strings.TrimSpace(input.CWD),
 		CreatedAt:      now,
-		Sync: ScheduleSync{
-			ManagedBy: ManagedByInProcess,
-			State:     SyncStateFallback,
-		},
 	}
 
 	switch trigger {
@@ -542,7 +558,7 @@ func (s *Store) load() ([]Schedule, error) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
 	}
-	normalized, err := normalizeSchedules(doc.Schedules, s.loc)
+	normalized, err := normalizeSchedules(doc.Schedules, s.loc, s.backends)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +570,7 @@ func (s *Store) save(schedules []Schedule) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return err
 	}
-	normalized, err := normalizeSchedules(schedules, s.loc)
+	normalized, err := normalizeSchedules(schedules, s.loc, s.backends)
 	if err != nil {
 		return err
 	}
@@ -567,10 +583,10 @@ func (s *Store) save(schedules []Schedule) error {
 	return os.WriteFile(s.path, data, 0600)
 }
 
-func normalizeSchedules(schedules []Schedule, loc *time.Location) ([]Schedule, error) {
+func normalizeSchedules(schedules []Schedule, loc *time.Location, backends *backendReconciler) ([]Schedule, error) {
 	normalized := make([]Schedule, 0, len(schedules))
 	for _, sc := range schedules {
-		upgraded, err := normalizeLoadedSchedule(sc, loc)
+		upgraded, err := normalizeLoadedSchedule(sc, loc, backends)
 		if err != nil {
 			return nil, err
 		}
@@ -579,20 +595,14 @@ func normalizeSchedules(schedules []Schedule, loc *time.Location) ([]Schedule, e
 	return normalized, nil
 }
 
-func normalizeLoadedSchedule(sc Schedule, loc *time.Location) (Schedule, error) {
+func normalizeLoadedSchedule(sc Schedule, loc *time.Location, backends *backendReconciler) (Schedule, error) {
 	if loc == nil {
 		loc = time.Local
 	}
+	if backends == nil {
+		backends = defaultBackendReconciler()
+	}
 	sc.Spec.Trigger = inferTrigger(sc)
-	sc.Sync.ManagedBy = strings.TrimSpace(sc.Sync.ManagedBy)
-	sc.Sync.State = strings.TrimSpace(sc.Sync.State)
-	sc.Sync.Error = strings.TrimSpace(sc.Sync.Error)
-	if sc.Sync.ManagedBy == "" {
-		sc.Sync.ManagedBy = ManagedByInProcess
-	}
-	if sc.Sync.State == "" {
-		sc.Sync.State = SyncStateFallback
-	}
 
 	switch sc.Spec.Trigger {
 	case TriggerAt:
@@ -628,7 +638,7 @@ func normalizeLoadedSchedule(sc Schedule, loc *time.Location) (Schedule, error) 
 		return Schedule{}, fmt.Errorf("unsupported trigger: %s", sc.Spec.Trigger)
 	}
 
-	return sc, nil
+	return backends.Normalize(sc)
 }
 
 func inferTrigger(sc Schedule) Trigger {
