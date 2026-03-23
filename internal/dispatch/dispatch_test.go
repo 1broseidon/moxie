@@ -704,3 +704,23 @@ func TestProcessJobCompletesOneShotScheduleAfterDelivery(t *testing.T) {
 		t.Fatalf("expected one-shot schedule to be removed after delivery, err = %v", err)
 	}
 }
+
+func TestProcessJobDropsDeliveredScheduleJobWhenScheduleMissing(t *testing.T) {
+	dir := useTempStoreDir(t)
+	schedules := scheduler.NewStore(filepath.Join(dir, "schedules.json"), time.FixedZone("CDT", -5*60*60))
+
+	job := &store.PendingJob{
+		ID:             "job-302",
+		ScheduleID:     "sch-missing",
+		Status:         "delivered",
+		ConversationID: "telegram:1",
+		Result:         "sent",
+	}
+	store.WriteJob(*job)
+
+	dispatch.ProcessJob(job, nil, schedules, dispatch.Callbacks{})
+
+	if store.JobExists(job.ID) {
+		t.Fatalf("expected orphaned delivered schedule job %s to be removed", job.ID)
+	}
+}
