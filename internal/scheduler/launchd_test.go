@@ -30,7 +30,9 @@ func TestLaunchdTriggerSpecTranslatesAtSchedule(t *testing.T) {
 	if len(spec.calendar) != 1 {
 		t.Fatalf("calendar len = %d, want 1", len(spec.calendar))
 	}
-	want := map[string]int{"Minute": 15, "Hour": 10, "Day": 18, "Month": 3}
+	// The implementation converts At to time.Local, so expected values must match.
+	local := sc.Spec.At.In(time.Local)
+	want := map[string]int{"Minute": local.Minute(), "Hour": local.Hour(), "Day": local.Day(), "Month": int(local.Month())}
 	for key, value := range want {
 		if got := spec.calendar[0][key]; got != value {
 			t.Fatalf("calendar[%q] = %d, want %d", key, got, value)
