@@ -2,6 +2,20 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.3] - 2026-03-23
+
+### Changed
+
+- Synthesis prompt rewritten for natural conversation flow instead of formal report-style responses
+- Documented `moxie subagent list/show/cancel` commands and sequential task continuation in guide and CLI reference
+
+### Fixed
+
+- macOS launchd one-shot schedules: `--in` durations now round up to next whole minute instead of falling back to in-process
+- `schedule rm` no longer blocked by stale `RunningJobID` when the referenced job no longer exists
+- Schedule store writes are now atomic (temp file + rename) to prevent JSON corruption from concurrent writers
+- Schedule store reads fall back to `.bak` copy when primary JSON is corrupt
+
 ## [0.2.2] - 2026-03-23
 
 ### Changed
