@@ -2,6 +2,17 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.2] - 2026-03-23
+
+### Changed
+
+- Synthesis continuation loop hardened per code review: model now passed through to synthesis prompt, continuation trigger tightened to require explicit sequential requests, result marked as untrusted to mitigate prompt injection
+
+### Fixed
+
+- Duplicate thread messages caused by concurrent writers (synthesis and main conversation) — bumped oneagent to v0.11.12 with turn-level dedup
+- Added pidfile guard to `moxie serve` to prevent duplicate instances from running simultaneously
+
 ## [0.2.1] - 2026-03-22
 
 ### Added
