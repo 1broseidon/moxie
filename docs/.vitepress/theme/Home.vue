@@ -92,12 +92,14 @@ const features = [
         <div class="section-divider"></div>
       </div>
       <div class="code-block">
-        <pre><code><span class="code-comment"># Install and configure</span>
+        <pre><code><span class="code-comment"># Install</span>
 brew install 1broseidon/tap/moxie
+
+<span class="code-comment"># Preferred setup: configure and install the background service</span>
 moxie init
 
-<span class="code-comment"># Start the service</span>
-moxie serve
+<span class="code-comment"># Optional: verify the service</span>
+moxie service status
 
 <span class="code-comment"># Now in Telegram or Slack:</span>
 <span class="code-comment"># "explain the auth module"        → dispatches to Claude</span>
