@@ -61,6 +61,11 @@ func (b *launchdBackend) SupportsSchedule(sc Schedule) bool {
 	return err == nil
 }
 
+func (b *launchdBackend) SupportError(sc Schedule) error {
+	_, err := b.triggerSpec(sc)
+	return err
+}
+
 func (b *launchdBackend) Install(sc Schedule) error {
 	return b.installOrUpdate(sc, false)
 }

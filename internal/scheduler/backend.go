@@ -38,6 +38,10 @@ type scheduleSupportChecker interface {
 	SupportsSchedule(Schedule) bool
 }
 
+type scheduleSupportExplainer interface {
+	SupportError(Schedule) error
+}
+
 type backendReconciler struct {
 	native   []ScheduleBackend
 	fallback ScheduleBackend
@@ -117,7 +121,7 @@ func (r *backendReconciler) Normalize(sc Schedule) (Schedule, error) {
 }
 
 func (r *backendReconciler) Materialize(sc Schedule) (Schedule, error) {
-	target := r.selectBackend(sc)
+	target, supportErr := r.selectBackend(sc)
 	next := sc
 	next.Sync.Error = ""
 
@@ -137,10 +141,21 @@ func (r *backendReconciler) Materialize(sc Schedule) (Schedule, error) {
 	if err == nil {
 		next.Sync.ManagedBy = target.Name()
 		next.Sync.State = r.defaultSyncState(target)
+		if target.Name() == r.fallback.Name() && supportErr != nil {
+			next.Sync.Error = supportErr.Error()
+		}
 		return next, nil
 	}
 	if target.Name() == r.fallback.Name() {
+		if supportErr != nil {
+			return Schedule{}, fmt.Errorf("materialize schedule %s via %s after native fallback reason %q: %w", sc.ID, target.Name(), supportErr.Error(), err)
+		}
 		return Schedule{}, fmt.Errorf("materialize schedule %s via %s: %w", sc.ID, target.Name(), err)
+	}
+	if existing != nil && existing.Name() == target.Name() {
+		if removeErr := existing.Remove(sc.ID); removeErr != nil {
+			return Schedule{}, fmt.Errorf("materialize schedule %s via %s: %w (cleanup %s: %v)", sc.ID, target.Name(), err, existing.Name(), removeErr)
+		}
 	}
 	if fallbackErr := r.fallback.Install(sc); fallbackErr != nil {
 		return Schedule{}, fmt.Errorf("materialize schedule %s via %s: %w (fallback %s: %v)", sc.ID, target.Name(), err, r.fallback.Name(), fallbackErr)
@@ -154,18 +169,23 @@ func (r *backendReconciler) Materialize(sc Schedule) (Schedule, error) {
 func (r *backendReconciler) Remove(sc Schedule) error {
 	backend := r.backendForManagedBy(sc.Sync.ManagedBy)
 	if backend == nil {
-		backend = r.selectBackend(sc)
+		backend, _ = r.selectBackend(sc)
 	}
 	return backend.Remove(sc.ID)
 }
 
-func (r *backendReconciler) selectBackend(sc Schedule) ScheduleBackend {
+func (r *backendReconciler) selectBackend(sc Schedule) (ScheduleBackend, error) {
+	var supportErr error
 	for _, backend := range r.native {
-		if backendSupportsSchedule(backend, sc) {
-			return backend
+		supported, err := backendSupportsSchedule(backend, sc)
+		if supported {
+			return backend, nil
+		}
+		if supportErr == nil && err != nil {
+			supportErr = err
 		}
 	}
-	return r.fallback
+	return r.fallback, supportErr
 }
 
 func (r *backendReconciler) backendForManagedBy(name string) ScheduleBackend {
@@ -182,7 +202,7 @@ func (r *backendReconciler) defaultSyncState(backend ScheduleBackend) string {
 	return SyncStateFallback
 }
 
-func backendSupportsSchedule(backend ScheduleBackend, sc Schedule) bool {
+func backendSupportsSchedule(backend ScheduleBackend, sc Schedule) (bool, error) {
 	caps := backend.Supports()
 	supportsTrigger := false
 	switch canonicalTrigger(sc.Spec.Trigger) {
@@ -190,27 +210,40 @@ func backendSupportsSchedule(backend ScheduleBackend, sc Schedule) bool {
 		supportsTrigger = caps.NativeAt
 	case TriggerInterval:
 		if !caps.NativeInterval {
-			return false
+			return false, fmt.Errorf("%s does not support interval schedules", backend.Name())
 		}
 		if caps.MinInterval <= 0 {
 			supportsTrigger = true
 			break
 		}
 		d, err := parseEvery(sc.Spec.Interval)
-		supportsTrigger = err == nil && d >= caps.MinInterval
+		if err != nil {
+			return false, err
+		}
+		if d < caps.MinInterval {
+			return false, fmt.Errorf("%s interval schedules require at least %s", backend.Name(), caps.MinInterval)
+		}
+		supportsTrigger = true
 	case TriggerCalendar:
 		supportsTrigger = caps.NativeCalendar
 	default:
-		return false
+		return false, fmt.Errorf("%s does not support trigger %q", backend.Name(), sc.Spec.Trigger)
 	}
 	if !supportsTrigger {
-		return false
+		return false, fmt.Errorf("%s does not support %s schedules", backend.Name(), canonicalTrigger(sc.Spec.Trigger))
 	}
 	checker, ok := backend.(scheduleSupportChecker)
 	if !ok {
-		return true
+		return true, nil
 	}
-	return checker.SupportsSchedule(sc)
+	if checker.SupportsSchedule(sc) {
+		return true, nil
+	}
+	explainer, ok := backend.(scheduleSupportExplainer)
+	if !ok {
+		return false, nil
+	}
+	return false, explainer.SupportError(sc)
 }
 
 func FireCommand(id string) []string {

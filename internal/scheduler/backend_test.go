@@ -52,6 +52,49 @@ func (r *recordingLaunchdRunner) run(name string, args ...string) ([]byte, error
 	return nil, nil
 }
 
+type recordingNativeBackend struct {
+	name       string
+	caps       BackendCaps
+	supportErr error
+	installErr error
+	updateErr  error
+	removeErr  error
+	installs   []string
+	updates    []string
+	removes    []string
+}
+
+func (b *recordingNativeBackend) Name() string {
+	return b.name
+}
+
+func (b *recordingNativeBackend) Install(sc Schedule) error {
+	b.installs = append(b.installs, sc.ID)
+	return b.installErr
+}
+
+func (b *recordingNativeBackend) Update(sc Schedule) error {
+	b.updates = append(b.updates, sc.ID)
+	return b.updateErr
+}
+
+func (b *recordingNativeBackend) Remove(id string) error {
+	b.removes = append(b.removes, id)
+	return b.removeErr
+}
+
+func (b *recordingNativeBackend) Supports() BackendCaps {
+	return b.caps
+}
+
+func (b *recordingNativeBackend) SupportsSchedule(Schedule) bool {
+	return b.supportErr == nil
+}
+
+func (b *recordingNativeBackend) SupportError(Schedule) error {
+	return b.supportErr
+}
+
 func testLaunchdBackend(t *testing.T) (*launchdBackend, *recordingLaunchdRunner, string) {
 	t.Helper()
 	home := t.TempDir()
@@ -196,14 +239,25 @@ func TestAddFallsBackWhenLaunchdCannotRepresentSchedule(t *testing.T) {
 	if sc.Sync.State != SyncStateFallback {
 		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
 	}
-	if sc.Sync.Error != "" {
-		t.Fatalf("sync_error = %q, want empty", sc.Sync.Error)
+	if !strings.Contains(sc.Sync.Error, "minute precision") {
+		t.Fatalf("sync_error = %q, want minute precision reason", sc.Sync.Error)
 	}
 	if len(runner.commands) != 0 {
 		t.Fatalf("launchd commands = %v, want none", runner.commands)
 	}
 	if len(fallback.installs) != 1 || fallback.installs[0] != sc.ID {
 		t.Fatalf("fallback installs = %v, want [%s]", fallback.installs, sc.ID)
+	}
+	stored := readStoredScheduleRecord(t, store.path)
+	sync := decodeRawObject(t, stored["sync"], "stored sync")
+	if got := strings.Trim(string(sync["managed_by"]), `"`); got != ManagedByInProcess {
+		t.Fatalf("stored managed_by = %q, want %q", got, ManagedByInProcess)
+	}
+	if got := strings.Trim(string(sync["state"]), `"`); got != SyncStateFallback {
+		t.Fatalf("stored sync state = %q, want %q", got, SyncStateFallback)
+	}
+	if got := strings.Trim(string(sync["error"]), `"`); !strings.Contains(got, "minute precision") {
+		t.Fatalf("stored sync error = %q, want minute precision reason", got)
 	}
 }
 
@@ -250,6 +304,80 @@ func TestAddFallsBackWhenLaunchdInstallFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(launchdSchedulePlistPath(home, sc.ID)); !os.IsNotExist(statErr) {
 		t.Fatalf("plist stat err = %v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestMaterializeRemovesExistingNativeScheduleBeforeFallbackAfterUpdateFailure(t *testing.T) {
+	native := &recordingNativeBackend{
+		name:      ManagedByLaunchd,
+		caps:      BackendCaps{NativeInterval: true, MinInterval: time.Minute},
+		updateErr: errors.New("update failed"),
+	}
+	fallback := &recordingInProcessBackend{}
+	reconciler := newBackendReconciler(native, fallback)
+
+	sc, err := reconciler.Materialize(Schedule{
+		ID:     "sch-update-failure",
+		Action: ActionDispatch,
+		Spec: ScheduleSpec{
+			Trigger:  TriggerInterval,
+			Interval: "1h0m0s",
+		},
+		Sync: ScheduleSync{
+			ManagedBy: ManagedByLaunchd,
+			State:     SyncStateSynced,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Materialize(): %v", err)
+	}
+	if len(native.updates) != 1 || native.updates[0] != "sch-update-failure" {
+		t.Fatalf("native updates = %v, want [sch-update-failure]", native.updates)
+	}
+	if len(native.removes) != 1 || native.removes[0] != "sch-update-failure" {
+		t.Fatalf("native removes = %v, want [sch-update-failure]", native.removes)
+	}
+	if len(fallback.installs) != 1 || fallback.installs[0] != "sch-update-failure" {
+		t.Fatalf("fallback installs = %v, want [sch-update-failure]", fallback.installs)
+	}
+	if sc.Sync.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByInProcess)
+	}
+	if sc.Sync.State != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
+	}
+	if !strings.Contains(sc.Sync.Error, "update failed") {
+		t.Fatalf("sync_error = %q, want update failure", sc.Sync.Error)
+	}
+}
+
+func TestMaterializeReturnsErrorWhenNativeCleanupFailsAfterUpdateFailure(t *testing.T) {
+	native := &recordingNativeBackend{
+		name:      ManagedByLaunchd,
+		caps:      BackendCaps{NativeInterval: true, MinInterval: time.Minute},
+		updateErr: errors.New("update failed"),
+		removeErr: errors.New("cleanup failed"),
+	}
+	fallback := &recordingInProcessBackend{}
+	reconciler := newBackendReconciler(native, fallback)
+
+	_, err := reconciler.Materialize(Schedule{
+		ID:     "sch-update-failure",
+		Action: ActionDispatch,
+		Spec: ScheduleSpec{
+			Trigger:  TriggerInterval,
+			Interval: "1h0m0s",
+		},
+		Sync: ScheduleSync{
+			ManagedBy: ManagedByLaunchd,
+			State:     SyncStateSynced,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cleanup") || !strings.Contains(err.Error(), "update failed") {
+		t.Fatalf("Materialize() err = %v, want cleanup + update failure", err)
+	}
+	if len(fallback.installs) != 0 {
+		t.Fatalf("fallback installs = %v, want none", fallback.installs)
 	}
 }
 
