@@ -1,7 +1,10 @@
 package scheduler
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +36,41 @@ func (b *recordingInProcessBackend) Remove(id string) error {
 
 func (b *recordingInProcessBackend) Supports() BackendCaps {
 	return BackendCaps{}
+}
+
+type recordingLaunchdRunner struct {
+	failures map[string]error
+	commands []string
+}
+
+func (r *recordingLaunchdRunner) run(name string, args ...string) ([]byte, error) {
+	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
+	r.commands = append(r.commands, command)
+	if err := r.failures[command]; err != nil {
+		return []byte(err.Error()), err
+	}
+	return nil, nil
+}
+
+func testLaunchdBackend(t *testing.T) (*launchdBackend, *recordingLaunchdRunner, string) {
+	t.Helper()
+	home := t.TempDir()
+	runner := &recordingLaunchdRunner{failures: map[string]error{}}
+	backend := &launchdBackend{
+		homeDir: func() (string, error) { return home, nil },
+		binaryPath: func() (string, error) {
+			return "/usr/local/bin/moxie", nil
+		},
+		uid: func() int { return 501 },
+		env: func() map[string]string {
+			return map[string]string{
+				"PATH": "/opt/homebrew/bin:/usr/bin:/bin",
+				"HOME": home,
+			}
+		},
+		runCommand: runner.run,
+	}
+	return backend, runner, home
 }
 
 func testStoreWithBackends(t *testing.T, backends ...ScheduleBackend) *Store {
@@ -70,6 +108,151 @@ func TestAddMaterializesThroughInProcessBackend(t *testing.T) {
 	}
 }
 
+func TestAddMaterializesThroughLaunchdWhenSupported(t *testing.T) {
+	launchdBackend, runner, home := testLaunchdBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, launchdBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedByLaunchd {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByLaunchd)
+	}
+	if sc.Sync.State != SyncStateSynced {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateSynced)
+	}
+	if sc.Sync.Error != "" {
+		t.Fatalf("sync_error = %q, want empty", sc.Sync.Error)
+	}
+	if len(fallback.installs) != 0 {
+		t.Fatalf("fallback installs = %v, want none", fallback.installs)
+	}
+	plistPath := launchdSchedulePlistPath(home, sc.ID)
+	wantBootstrap := "launchctl bootstrap gui/501 " + plistPath
+	if len(runner.commands) != 1 || runner.commands[0] != wantBootstrap {
+		t.Fatalf("commands = %v, want [%q]", runner.commands, wantBootstrap)
+	}
+	content, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("read plist: %v", err)
+	}
+	for _, needle := range []string{
+		"<string>/usr/local/bin/moxie</string>",
+		"<string>schedule</string>",
+		"<string>fire</string>",
+		"<string>" + sc.ID + "</string>",
+		"<key>StartInterval</key>",
+		"<integer>5400</integer>",
+	} {
+		if !strings.Contains(string(content), needle) {
+			t.Fatalf("plist missing %q: %s", needle, string(content))
+		}
+	}
+	stored := readStoredScheduleRecord(t, store.path)
+	sync := decodeRawObject(t, stored["sync"], "stored sync")
+	if got := strings.Trim(string(sync["managed_by"]), `"`); got != ManagedByLaunchd {
+		t.Fatalf("stored managed_by = %q, want %q", got, ManagedByLaunchd)
+	}
+	if got := strings.Trim(string(sync["state"]), `"`); got != SyncStateSynced {
+		t.Fatalf("stored sync state = %q, want %q", got, SyncStateSynced)
+	}
+	due, err := store.Due(now.Add(3 * time.Hour))
+	if err != nil {
+		t.Fatalf("Due(): %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("Due() = %v, want no in-process launchd schedules", due)
+	}
+}
+
+func TestAddFallsBackWhenLaunchdCannotRepresentSchedule(t *testing.T) {
+	launchdBackend, runner, _ := testLaunchdBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, launchdBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerAt,
+		Action:  ActionSend,
+		At:      "2026-03-18T10:00:05-05:00",
+		Text:    "Call John",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByInProcess)
+	}
+	if sc.Sync.State != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
+	}
+	if sc.Sync.Error != "" {
+		t.Fatalf("sync_error = %q, want empty", sc.Sync.Error)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("launchd commands = %v, want none", runner.commands)
+	}
+	if len(fallback.installs) != 1 || fallback.installs[0] != sc.ID {
+		t.Fatalf("fallback installs = %v, want [%s]", fallback.installs, sc.ID)
+	}
+}
+
+func TestAddFallsBackWhenLaunchdInstallFails(t *testing.T) {
+	launchdBackend, runner, home := testLaunchdBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, launchdBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.buildSchedule(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	}, now)
+	if err != nil {
+		t.Fatalf("buildSchedule(): %v", err)
+	}
+	bootstrap := "launchctl bootstrap gui/501 " + launchdSchedulePlistPath(home, sc.ID)
+	runner.failures[bootstrap] = errors.New("bootstrap failed")
+
+	sc, err = store.Add(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByInProcess)
+	}
+	if sc.Sync.State != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
+	}
+	if !strings.Contains(sc.Sync.Error, "bootstrap failed") {
+		t.Fatalf("sync_error = %q, want bootstrap failure", sc.Sync.Error)
+	}
+	if len(fallback.installs) != 1 || fallback.installs[0] != sc.ID {
+		t.Fatalf("fallback installs = %v, want [%s]", fallback.installs, sc.ID)
+	}
+	if _, statErr := os.Stat(launchdSchedulePlistPath(home, sc.ID)); !os.IsNotExist(statErr) {
+		t.Fatalf("plist stat err = %v, want os.ErrNotExist", statErr)
+	}
+}
+
 func TestLoadBackfillsSyncViaReconcilerWithoutMaterializing(t *testing.T) {
 	backend := &recordingInProcessBackend{}
 	store := testStoreWithBackends(t, backend)
@@ -102,6 +285,49 @@ func TestLoadBackfillsSyncViaReconcilerWithoutMaterializing(t *testing.T) {
 	}
 	if schedules[0].Sync.State != SyncStateFallback {
 		t.Fatalf("sync_state = %q, want %q", schedules[0].Sync.State, SyncStateFallback)
+	}
+}
+
+func TestDueSkipsLaunchdManagedSchedules(t *testing.T) {
+	launchdBackend, _, _ := testLaunchdBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, launchdBackend, fallback)
+	now := time.Date(2026, 3, 18, 10, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+	schedules := []Schedule{
+		{
+			ID:        "sch-launchd",
+			Action:    ActionDispatch,
+			Spec:      ScheduleSpec{Trigger: TriggerInterval, Interval: "1h0m0s"},
+			Text:      "native",
+			CreatedAt: now.Add(-time.Hour),
+			NextRun:   now.Add(-time.Minute),
+			Sync: ScheduleSync{
+				ManagedBy: ManagedByLaunchd,
+				State:     SyncStateSynced,
+			},
+		},
+		{
+			ID:        "sch-fallback",
+			Action:    ActionDispatch,
+			Spec:      ScheduleSpec{Trigger: TriggerInterval, Interval: "1h0m0s"},
+			Text:      "fallback",
+			CreatedAt: now.Add(-time.Hour),
+			NextRun:   now.Add(-time.Minute),
+			Sync: ScheduleSync{
+				ManagedBy: ManagedByInProcess,
+				State:     SyncStateFallback,
+			},
+		},
+	}
+	if err := store.save(schedules); err != nil {
+		t.Fatalf("save schedules: %v", err)
+	}
+	due, err := store.Due(now)
+	if err != nil {
+		t.Fatalf("Due(): %v", err)
+	}
+	if len(due) != 1 || due[0].ID != "sch-fallback" {
+		t.Fatalf("Due() = %v, want only sch-fallback", due)
 	}
 }
 

@@ -20,13 +20,16 @@ Use exactly one trigger per schedule:
 | `--every` | Recurring elapsed-time interval | `--every 15m`, `--every 2h` |
 | `--cron` | Recurring cron expression | `--cron "0 1 * * *"` |
 
-Moxie currently uses this portable schedule model across platforms. Native scheduler backends are future work:
+Moxie keeps one portable schedule model across platforms and now materializes supported schedules into native `launchd` jobs on macOS automatically. No separate install or sync step is required after `moxie schedule add`.
 
-- Linux native timer integration is not implemented yet
-- macOS schedules are not yet backed by `launchd`
-- Windows schedules are not yet backed by Task Scheduler
+Current platform behavior:
 
-Today that means recurring schedules still run through Moxie's portable schedule model (`--every` or `--cron`), and on Windows you must keep `moxie serve` running yourself because native service install/control is not implemented yet.
+- macOS: supported one-shot, interval, and portable calendar schedules are installed as per-user `launchd` jobs
+- macOS fallback: second-precision one-shots and calendar shapes that do not map cleanly to `launchd` stay on the in-process scheduler automatically
+- Linux: native timer integration is not implemented yet
+- Windows: schedules are not yet backed by Task Scheduler
+
+Linux and Windows still rely on Moxie's in-process scheduler, so on those platforms you must keep `moxie serve` running if you want schedules to keep firing.
 
 Use `--in` for a one-time relative reminder and `--every` for a repeating elapsed-time interval.
 

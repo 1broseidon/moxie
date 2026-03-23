@@ -138,3 +138,5 @@ moxie service status
 ```
 
 When generated via `moxie service install`, the LaunchAgent also captures the current `PATH` and `HOME` so backend CLIs remain available outside your interactive shell session. The service working directory comes from `--cwd`, otherwise `default_cwd`, otherwise the platform workspace default.
+
+Windows currently has platform-default workspace groundwork, but native `moxie service install` / service control support is not implemented yet. On macOS, Moxie now materializes supported schedules into per-user `launchd` jobs automatically and falls back to the in-process scheduler when a schedule shape cannot be represented exactly. Windows does not yet have a Task Scheduler backend.

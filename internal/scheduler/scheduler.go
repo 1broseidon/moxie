@@ -374,6 +374,9 @@ func (s *Store) Due(now time.Time) ([]Schedule, error) {
 		if sc.RunningJobID != "" {
 			continue
 		}
+		if managedBy := strings.TrimSpace(sc.Sync.ManagedBy); managedBy != "" && managedBy != s.backends.fallback.Name() {
+			continue
+		}
 		if sc.NextRun.IsZero() || sc.NextRun.After(now) {
 			continue
 		}

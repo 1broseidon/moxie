@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -33,6 +34,10 @@ type BackendCaps struct {
 	MinInterval    time.Duration
 }
 
+type scheduleSupportChecker interface {
+	SupportsSchedule(Schedule) bool
+}
+
 type backendReconciler struct {
 	native   []ScheduleBackend
 	fallback ScheduleBackend
@@ -42,7 +47,11 @@ type backendReconciler struct {
 type inProcessBackend struct{}
 
 func defaultBackendReconciler() *backendReconciler {
-	return newBackendReconciler(inProcessBackend{})
+	backends := []ScheduleBackend{inProcessBackend{}}
+	if runtime.GOOS == "darwin" {
+		backends = append([]ScheduleBackend{newLaunchdBackend()}, backends...)
+	}
+	return newBackendReconciler(backends...)
 }
 
 func newBackendReconciler(backends ...ScheduleBackend) *backendReconciler {
@@ -97,7 +106,7 @@ func (r *backendReconciler) Normalize(sc Schedule) (Schedule, error) {
 
 	backend := r.backendForManagedBy(next.Sync.ManagedBy)
 	if backend == nil {
-		backend = r.selectBackend(next)
+		backend = r.fallback
 		next.Sync.ManagedBy = backend.Name()
 		next.Sync.State = ""
 	}
@@ -175,23 +184,33 @@ func (r *backendReconciler) defaultSyncState(backend ScheduleBackend) string {
 
 func backendSupportsSchedule(backend ScheduleBackend, sc Schedule) bool {
 	caps := backend.Supports()
+	supportsTrigger := false
 	switch canonicalTrigger(sc.Spec.Trigger) {
 	case TriggerAt:
-		return caps.NativeAt
+		supportsTrigger = caps.NativeAt
 	case TriggerInterval:
 		if !caps.NativeInterval {
 			return false
 		}
 		if caps.MinInterval <= 0 {
-			return true
+			supportsTrigger = true
+			break
 		}
 		d, err := parseEvery(sc.Spec.Interval)
-		return err == nil && d >= caps.MinInterval
+		supportsTrigger = err == nil && d >= caps.MinInterval
 	case TriggerCalendar:
-		return caps.NativeCalendar
+		supportsTrigger = caps.NativeCalendar
 	default:
 		return false
 	}
+	if !supportsTrigger {
+		return false
+	}
+	checker, ok := backend.(scheduleSupportChecker)
+	if !ok {
+		return true
+	}
+	return checker.SupportsSchedule(sc)
 }
 
 func FireCommand(id string) []string {
