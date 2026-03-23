@@ -53,9 +53,10 @@ moxie schedule rm <id>          # Delete a schedule
 | `--transport` | Target transport (`telegram` or `slack`) |
 | `--conversation` | Target a specific conversation ID |
 | `--action` | Required: `send` or `dispatch` |
-| `--in` | Relative delay (e.g. `5m`, `2h`) |
-| `--at` | Absolute time (RFC 3339) |
-| `--cron` | Cron expression |
+| `--in` | Relative one-shot delay (e.g. `5m`, `2h`) |
+| `--at` | Absolute one-shot time (RFC 3339) |
+| `--every` | Recurring elapsed-time interval (e.g. `15m`, `2h`) |
+| `--cron` | Recurring cron expression |
 | `--text` | Message or prompt text |
 | `--backend` | Override backend for `dispatch` schedules |
 | `--model` | Override model for `dispatch` schedules |

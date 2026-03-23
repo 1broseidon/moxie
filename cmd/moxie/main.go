@@ -539,6 +539,7 @@ Flags for add:
   --text <text>                               Message text or dispatch task
   --in <duration>                             Relative one-shot schedule like 5m, 2h, or 1d2h30m
   --at <RFC3339 time>                         Exact one-shot timestamp with offset
+  --every <duration>                          Recurring interval schedule like 15m, 2h, or 24h
   --cron <spec>                               Recurring cron schedule
   --backend <name>                            Override captured backend for dispatch schedules
   --model <name>                              Override captured model for dispatch schedules
@@ -546,17 +547,18 @@ Flags for add:
   --cwd <dir>                                 Override captured working directory for dispatch schedules
 
 Notes:
-  Use exactly one of --in, --at, or --cron
+  Use exactly one of --in, --at, --every, or --cron
   Use --conversation to target a specific provider conversation, or --transport to target the configured default conversation for one transport
   Dispatch schedules capture backend/model/thread/cwd at creation time
 
 When to use:
   Only when explicitly asked to create, inspect, modify, or delete schedules
-  Prefer --in for relative times, --at for exact timestamps, and --cron for recurring schedules
+  Prefer --in for one-shot relative times, --at for exact timestamps, --every for recurring interval schedules, and --cron for recurring calendar schedules
   Use action send for fixed messages and action dispatch for agent work
 
 Examples:
   moxie schedule add --transport telegram --action send --in 5m --text "Call John"
+  moxie schedule add --transport telegram --action dispatch --every 30m --text "Check queue depth"
   moxie schedule add --conversation slack:C123:1710000000.100 --action send --at 2026-03-18T10:00:00-05:00 --text "Call John"
   moxie schedule add --transport slack --action dispatch --cron "0 1 * * *" --text "Run a security scan"
   moxie schedule list
@@ -711,24 +713,38 @@ func cmdResultSearch(args []string) {
 	}
 }
 
-func mustScheduleTrigger(in, at, cronSpec string) scheduler.Trigger {
+func resolveScheduleTrigger(in, at, every, cronSpec string) (scheduler.Trigger, error) {
 	count := 0
 	trigger := scheduler.TriggerAt
 	if strings.TrimSpace(in) != "" {
 		count++
+		trigger = scheduler.TriggerAt
 	}
 	if strings.TrimSpace(at) != "" {
 		count++
+		trigger = scheduler.TriggerAt
+	}
+	if strings.TrimSpace(every) != "" {
+		count++
+		trigger = scheduler.TriggerInterval
 	}
 	if strings.TrimSpace(cronSpec) != "" {
 		count++
 		trigger = scheduler.TriggerCalendar
 	}
 	if count == 0 {
-		fatal("missing schedule trigger: use --in, --at, or --cron")
+		return "", fmt.Errorf("missing schedule trigger: use --in, --at, --every, or --cron")
 	}
 	if count > 1 {
-		fatal("use exactly one of --in, --at, or --cron")
+		return "", fmt.Errorf("use exactly one of --in, --at, --every, or --cron")
+	}
+	return trigger, nil
+}
+
+func mustScheduleTrigger(in, at, every, cronSpec string) scheduler.Trigger {
+	trigger, err := resolveScheduleTrigger(in, at, every, cronSpec)
+	if err != nil {
+		fatal("%v", err)
 	}
 	return trigger
 }
@@ -805,6 +821,7 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	action := fs.String("action", "", "")
 	in := fs.String("in", "", "")
 	at := fs.String("at", "", "")
+	every := fs.String("every", "", "")
 	cronSpec := fs.String("cron", "", "")
 	text := fs.String("text", "", "")
 	cwdFlag := fs.String("cwd", "", "")
@@ -815,7 +832,7 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	conversationFlag := fs.String("conversation", "", "")
 
 	if err := fs.Parse(args); err != nil {
-		fatal("usage: moxie schedule add (--transport <telegram|slack>|--conversation <provider:channel[:thread]>) --action <send|dispatch> (--in <duration>|--at <time>|--cron <spec>) --text <text>")
+		fatal("usage: moxie schedule add (--transport <telegram|slack>|--conversation <provider:channel[:thread]>) --action <send|dispatch> (--in <duration>|--at <time>|--every <duration>|--cron <spec>) --text <text>")
 	}
 	if fs.NArg() > 0 {
 		fatal("unexpected schedule add args: %s", strings.Join(fs.Args(), " "))
@@ -832,10 +849,11 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 
 	state := store.ReadConversationState(conversation.ID())
 	input := scheduler.AddInput{
-		Trigger:        mustScheduleTrigger(*in, *at, *cronSpec),
+		Trigger:        mustScheduleTrigger(*in, *at, *every, *cronSpec),
 		Action:         scheduler.Action(strings.TrimSpace(*action)),
 		In:             *in,
 		At:             *at,
+		Every:          *every,
 		Cron:           *cronSpec,
 		Text:           *text,
 		ConversationID: conversation.ID(),
@@ -915,7 +933,7 @@ func formatScheduleHeadline(sc scheduler.Schedule) string {
 	case scheduler.TriggerAt:
 		return fmt.Sprintf("%s at %s", sc.Action, formatScheduleTime(sc.NextRun))
 	case scheduler.TriggerInterval:
-		return fmt.Sprintf("%s every %s next %s", sc.Action, sc.Spec.Interval, formatScheduleTime(sc.NextRun))
+		return fmt.Sprintf("%s every %s next %s", sc.Action, formatScheduleInterval(sc.Spec.Interval), formatScheduleTime(sc.NextRun))
 	case scheduler.TriggerCalendar:
 		return fmt.Sprintf("%s %s %s next %s", sc.Action, scheduleCalendarLabel(sc), scheduleCalendarDisplay(sc), formatScheduleTime(sc.NextRun))
 	default:
@@ -931,7 +949,7 @@ func renderSchedule(sc scheduler.Schedule) string {
 	case scheduler.TriggerAt:
 		fmt.Fprintf(&buf, "Trigger: at %s\n", formatScheduleTime(sc.Spec.At))
 	case scheduler.TriggerInterval:
-		fmt.Fprintf(&buf, "Trigger: every %s\n", sc.Spec.Interval)
+		fmt.Fprintf(&buf, "Trigger: every %s\n", formatScheduleInterval(sc.Spec.Interval))
 	case scheduler.TriggerCalendar:
 		fmt.Fprintf(&buf, "Trigger: %s %s\n", scheduleCalendarLabel(sc), scheduleCalendarDisplay(sc))
 	}
@@ -968,6 +986,45 @@ func renderSchedule(sc scheduler.Schedule) string {
 	}
 	fmt.Fprintf(&buf, "Text: %s\n", sc.Text)
 	return strings.TrimSpace(buf.String())
+}
+
+func formatScheduleInterval(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return raw
+	}
+	return formatCompactDuration(d)
+}
+
+func formatCompactDuration(d time.Duration) string {
+	if d == 0 {
+		return "0s"
+	}
+	sign := ""
+	if d < 0 {
+		sign = "-"
+		d = -d
+	}
+	parts := make([]string, 0, 3)
+	if hours := d / time.Hour; hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+		d -= hours * time.Hour
+	}
+	if minutes := d / time.Minute; minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+		d -= minutes * time.Minute
+	}
+	if seconds := d / time.Second; seconds > 0 {
+		parts = append(parts, fmt.Sprintf("%ds", seconds))
+	}
+	if len(parts) == 0 {
+		return sign + d.String()
+	}
+	return sign + strings.Join(parts, "")
 }
 
 func scheduleCalendarLabel(sc scheduler.Schedule) string {

@@ -15,9 +15,20 @@ Use exactly one trigger per schedule:
 
 | Flag | Description | Example |
 |------|-------------|---------|
-| `--in` | Relative delay from now | `--in 5m`, `--in 2h` |
-| `--at` | Absolute time (RFC 3339) | `--at 2026-03-20T10:00:00-05:00` |
+| `--in` | Relative one-shot delay from now | `--in 5m`, `--in 2h` |
+| `--at` | Absolute one-shot time (RFC 3339) | `--at 2026-03-20T10:00:00-05:00` |
+| `--every` | Recurring elapsed-time interval | `--every 15m`, `--every 2h` |
 | `--cron` | Recurring cron expression | `--cron "0 1 * * *"` |
+
+Moxie currently uses this portable schedule model across platforms. Native scheduler backends are future work:
+
+- Linux native timer integration is not implemented yet
+- macOS schedules are not yet backed by `launchd`
+- Windows schedules are not yet backed by Task Scheduler
+
+Today that means recurring schedules still run through Moxie's portable schedule model (`--every` or `--cron`), and on Windows you must keep `moxie serve` running yourself because native service install/control is not implemented yet.
+
+Use `--in` for a one-time relative reminder and `--every` for a repeating elapsed-time interval.
 
 ## Examples
 
@@ -29,6 +40,16 @@ moxie schedule add \
   --action send \
   --in 5m \
   --text "Call John"
+```
+
+### Queue check every 30 minutes
+
+```bash
+moxie schedule add \
+  --transport telegram \
+  --action dispatch \
+  --every 30m \
+  --text "Check queue depth and summarize any backlog"
 ```
 
 ### Daily security scan at 1am

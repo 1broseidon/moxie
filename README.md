@@ -341,10 +341,13 @@ Commands available in Telegram and Slack:
 Schedule one-time or recurring messages and dispatches:
 
 ```bash
-# Remind me in 5 minutes
+# Remind me in 5 minutes (one-shot relative)
 moxie schedule add --transport telegram --action send --in 5m --text "Call John"
 
-# Daily security scan at 1am
+# Check queue depth every 30 minutes (recurring interval)
+moxie schedule add --transport telegram --action dispatch --every 30m --text "Check queue depth"
+
+# Daily security scan at 1am (recurring calendar)
 moxie schedule add --transport slack --action dispatch --cron "0 1 * * *" --text "Run a security scan"
 
 # One-shot dispatch at a specific time

@@ -139,6 +139,37 @@ func TestAddIntervalSchedule(t *testing.T) {
 	}
 }
 
+func TestMarkDoneAdvancesIntervalSchedule(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+	if _, err := store.AttachJob(sc.ID, "job-interval"); err != nil {
+		t.Fatalf("attach job: %v", err)
+	}
+
+	doneAt := sc.NextRun.Add(5 * time.Second)
+	advanced, err := store.MarkDone(sc.ID, "job-interval", doneAt)
+	if err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+	if !advanced.LastRun.Equal(doneAt) {
+		t.Fatalf("last run = %v, want %v", advanced.LastRun, doneAt)
+	}
+	if !advanced.NextRun.Equal(doneAt.Add(90 * time.Minute)) {
+		t.Fatalf("next run = %v, want %v", advanced.NextRun, doneAt.Add(90*time.Minute))
+	}
+}
+
 func TestMarkDoneRemovesOneShot(t *testing.T) {
 	store := testStore(t)
 	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
@@ -252,6 +283,22 @@ func TestParseInCompoundDurationsAndValidation(t *testing.T) {
 	}
 }
 
+func TestParseEveryValidation(t *testing.T) {
+	got, err := parseEvery("90m")
+	if err != nil {
+		t.Fatalf("parseEvery(): %v", err)
+	}
+	if got != 90*time.Minute {
+		t.Fatalf("parseEvery() = %v, want %v", got, 90*time.Minute)
+	}
+
+	for _, raw := range []string{"", "30s", "0h", "2x"} {
+		if _, err := parseEvery(raw); err == nil {
+			t.Fatalf("expected parseEvery(%q) to fail", raw)
+		}
+	}
+}
+
 func TestResolveAtValidation(t *testing.T) {
 	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
 
@@ -280,6 +327,7 @@ func TestAddRejectsInvalidInputs(t *testing.T) {
 		{Trigger: TriggerAt, Action: "bad", At: "2026-03-18T10:00:00-05:00", Text: "hello", Now: now},
 		{Trigger: "bad", Action: ActionSend, At: "2026-03-18T10:00:00-05:00", Text: "hello", Now: now},
 		{Trigger: TriggerAt, Action: ActionSend, At: "2026-03-17T20:00:00-05:00", Text: "hello", Now: now},
+		{Trigger: TriggerInterval, Action: ActionDispatch, Every: "30s", Text: "hello", Now: now},
 		{Trigger: TriggerCron, Action: ActionSend, Cron: "", Text: "hello", Now: now},
 	}
 
