@@ -79,6 +79,9 @@ Delegate work to a background agent.
 
 ```bash
 moxie subagent --backend <name> --text <task> [flags]
+moxie subagent list [--all]     # List active subagent jobs
+moxie subagent show <job-id>    # Show full details for a job
+moxie subagent cancel <job-id>  # Cancel a running job
 ```
 
 | Flag | Description |
@@ -89,6 +92,8 @@ moxie subagent --backend <name> --text <task> [flags]
 | `--model` | Model override |
 | `--cwd` | Working directory override |
 | `--parent-job` | Explicit parent dispatch job to attach to |
+
+`moxie subagent list` shows active subagent jobs by default. Use `--all` to include completed and canceled jobs. `moxie subagent show` displays full job details including status, backend, model, thread, depth, attempt, run ID, and timestamps.
 
 ### `moxie result`
 

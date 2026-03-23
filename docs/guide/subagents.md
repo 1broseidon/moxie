@@ -32,6 +32,14 @@ moxie subagent \
 
 The primary agent can also delegate work by calling `moxie subagent` as a shell command during its conversation. The agent has access to `moxie subagent --help` which documents the flags and behavioral guidance.
 
+## Monitoring subagents
+
+```bash
+moxie subagent list [--all]    # Active jobs (--all includes completed/canceled)
+moxie subagent show <job-id>   # Full job details: status, backend, thread, etc.
+moxie subagent cancel <job-id> # Cancel a running job
+```
+
 ## Retrieving results
 
 ```bash
@@ -39,6 +47,10 @@ moxie result list [--limit <n>]  # List completed subagent results
 moxie result show <id>         # Show a specific result artifact
 moxie result search <query>    # Search artifacts by task text
 ```
+
+## Sequential tasks
+
+When you ask Moxie to do multiple tasks sequentially (e.g. "do A then B then C"), the synthesis step automatically dispatches the next task after each one completes. The loop continues until all tasks are done or one needs human attention.
 
 ## Depth limits
 
