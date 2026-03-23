@@ -78,7 +78,7 @@ Usage:
   moxie messages [--json|--raw] [-n N]    List recent messages (default: markdown)
   moxie msg                               Alias for messages
   moxie schedule <subcommand>             Manage schedules
-  moxie subagent --backend <name> --text <task>  Delegate work to a background agent
+  moxie subagent <subcommand>              Manage and delegate subagent work
   moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
   moxie service <subcommand>              Control the background service
@@ -571,12 +571,20 @@ Examples:
 }
 
 func subagentUsage() {
-	fmt.Println(`moxie subagent — delegate a task to a background agent
+	fmt.Println(`moxie subagent — manage and delegate subagent work
 
 Usage:
   moxie subagent --backend <name> --text <task>
+  moxie subagent list [--all]
+  moxie subagent show <job-id>
+  moxie subagent cancel <job-id>
 
-Flags:
+Subcommands:
+  list              List active subagent jobs (use --all to include completed/canceled)
+  show <job-id>     Show detailed status for a subagent job
+  cancel <job-id>   Cancel a running subagent job
+
+Flags for dispatch:
   --backend <name>            Required backend to run the delegated task
   --text <task>               Required self-contained task description
   --context-budget <n>        Context budget for compiled parent context (default 8192)
@@ -593,7 +601,9 @@ When to use:
 
 Examples:
   moxie subagent --backend codex --text "Audit the scheduler retry logic"
-  moxie subagent --backend gemini --context-budget 16384 --text "Summarize the Slack delivery edge cases"`)
+  moxie subagent list
+  moxie subagent show job-1774236872176111993
+  moxie subagent cancel job-1774236872176111993`)
 }
 
 func resultUsage() {
@@ -1086,14 +1096,6 @@ func parseSubagentArgs() *subagentArgs {
 	fs := flag.NewFlagSet("subagent", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	if len(os.Args) > 2 {
-		arg := os.Args[2]
-		if arg == "help" || arg == "--help" || arg == "-h" {
-			subagentUsage()
-			os.Exit(0)
-		}
-	}
-
 	args := &subagentArgs{}
 	fs.StringVar(&args.backend, "backend", "", "")
 	fs.StringVar(&args.text, "text", "", "")
@@ -1208,6 +1210,23 @@ func resolveReplyConversation(parent *store.PendingJob) string {
 }
 
 func cmdSubagent() {
+	if len(os.Args) > 2 {
+		switch os.Args[2] {
+		case "list", "ls":
+			cmdSubagentList(os.Args[3:])
+			return
+		case "show":
+			cmdSubagentShow(os.Args[3:])
+			return
+		case "cancel":
+			cmdSubagentCancel(os.Args[3:])
+			return
+		case "help", "--help", "-h":
+			subagentUsage()
+			return
+		}
+	}
+
 	args := parseSubagentArgs()
 
 	cfg, err := store.LoadConfig()
@@ -1271,6 +1290,163 @@ func cmdSubagent() {
 	}
 
 	fmt.Printf("subagent dispatched: %s\nbackend: %s\ndepth: %d/%d\ntask: %s\n", job.ID, args.backend, depth, maxDepth, args.text)
+}
+
+func isSubagentJob(j store.PendingJob) bool {
+	return j.Source == "subagent" || j.Source == "subagent-synthesis"
+}
+
+func isActiveSubagentJob(j store.PendingJob) bool {
+	return j.Status == "running" || j.Status == ""
+}
+
+func jobDisplayStatus(status string) string {
+	if status == "" {
+		return "pending"
+	}
+	return status
+}
+
+func jobDisplayTask(j store.PendingJob, maxLen int) string {
+	task := j.DelegatedTask
+	if task == "" {
+		task = j.Prompt
+	}
+	if len(task) > maxLen {
+		task = task[:maxLen] + "..."
+	}
+	return task
+}
+
+func jobDisplayAge(updated time.Time) string {
+	if updated.IsZero() {
+		return ""
+	}
+	return formatAge(time.Since(updated))
+}
+
+func cmdSubagentList(args []string) {
+	showAll := false
+	for _, a := range args {
+		if a == "--all" || a == "-a" {
+			showAll = true
+		}
+	}
+
+	jobs := store.ListJobs()
+	found := false
+	for _, j := range jobs {
+		if !isSubagentJob(j) {
+			continue
+		}
+		if !showAll && !isActiveSubagentJob(j) {
+			continue
+		}
+		fmt.Printf("%-30s  %-10s  %-8s  %-6s  %s\n",
+			j.ID, j.State.Backend, jobDisplayStatus(j.Status),
+			jobDisplayAge(j.Updated), jobDisplayTask(j, 72))
+		found = true
+	}
+	if !found {
+		if showAll {
+			fmt.Println("No subagent jobs found.")
+		} else {
+			fmt.Println("No active subagent jobs. Use --all to include completed/canceled.")
+		}
+	}
+}
+
+func printJobField(label, value string) {
+	if value != "" {
+		fmt.Printf("%-16s %s\n", label+":", value)
+	}
+}
+
+func printJobSupervision(sup store.SupervisionState) {
+	if sup.Attempt > 0 {
+		printJobField("Attempt", fmt.Sprintf("%d/%d", sup.Attempt, sup.MaxAttempts))
+	}
+	printJobField("Run ID", sup.ActiveRunID)
+	if !sup.LastEventAt.IsZero() {
+		printJobField("Last Event", fmt.Sprintf("%s (%s ago)",
+			sup.LastEventAt.Local().Format("15:04:05"),
+			formatAge(time.Since(sup.LastEventAt))))
+	}
+	if !sup.LastProgressAt.IsZero() {
+		printJobField("Last Progress", fmt.Sprintf("%s (%s ago)",
+			sup.LastProgressAt.Local().Format("15:04:05"),
+			formatAge(time.Since(sup.LastProgressAt))))
+	}
+	printJobField("Last Error", sup.LastError)
+}
+
+func cmdSubagentShow(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: moxie subagent show <job-id>")
+		os.Exit(1)
+	}
+	j, ok := store.ReadJob(args[0])
+	if !ok {
+		fmt.Fprintf(os.Stderr, "job not found: %s\n", args[0])
+		os.Exit(1)
+	}
+
+	printJobField("ID", j.ID)
+	printJobField("Status", jobDisplayStatus(j.Status))
+	printJobField("Source", j.Source)
+	printJobField("Backend", j.State.Backend)
+	printJobField("Model", j.State.Model)
+	printJobField("Thread", j.State.ThreadID)
+	printJobField("Parent", j.ParentJobID)
+	printJobField("Depth", fmt.Sprintf("%d", j.Depth))
+	printJobSupervision(j.Supervision)
+	printJobField("CWD", j.CWD)
+	if !j.Updated.IsZero() {
+		printJobField("Updated", j.Updated.Format(time.RFC3339))
+	}
+	printJobField("Conversation", j.ConversationID)
+	if j.ReplyConversation != j.ConversationID {
+		printJobField("Reply To", j.ReplyConversation)
+	}
+
+	task := jobDisplayTask(j, 500)
+	if task != "" {
+		fmt.Printf("\nTask:\n%s\n", task)
+	}
+}
+
+func cmdSubagentCancel(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: moxie subagent cancel <job-id>")
+		os.Exit(1)
+	}
+	jobID := args[0]
+	j, ok := store.ReadJob(jobID)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "job not found: %s\n", jobID)
+		os.Exit(1)
+	}
+	if j.Status != "running" && j.Status != "" {
+		fmt.Fprintf(os.Stderr, "job %s is not running (status: %s)\n", jobID, j.Status)
+		os.Exit(1)
+	}
+	j.Status = "canceled"
+	j.Updated = time.Now()
+	store.WriteJob(j)
+	fmt.Printf("canceled: %s\n", jobID)
+}
+
+func formatAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 // --- Serve loop ---
