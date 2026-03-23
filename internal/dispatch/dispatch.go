@@ -301,8 +301,12 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	}
 	if job.ScheduleID != "" && schedules != nil {
 		if _, err := schedules.MarkDone(job.ScheduleID, job.ID, time.Now()); err != nil {
-			log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
-			return
+			if os.IsNotExist(err) {
+				log.Printf("dropping orphaned schedule job %s for missing schedule %s", job.ID, job.ScheduleID)
+			} else {
+				log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
+				return
+			}
 		}
 	}
 	writeArtifact(job)
