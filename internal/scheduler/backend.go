@@ -55,6 +55,9 @@ func defaultBackendReconciler() *backendReconciler {
 	if runtime.GOOS == "darwin" {
 		backends = append([]ScheduleBackend{newLaunchdBackend()}, backends...)
 	}
+	if runtime.GOOS == "windows" {
+		backends = append([]ScheduleBackend{newSchTasksBackend()}, backends...)
+	}
 	return newBackendReconciler(backends...)
 }
 

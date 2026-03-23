@@ -38,16 +38,22 @@ func (b *recordingInProcessBackend) Supports() BackendCaps {
 	return BackendCaps{}
 }
 
-type recordingLaunchdRunner struct {
-	failures map[string]error
-	commands []string
+type recordingCommandRunner struct {
+	failures       map[string]error
+	prefixFailures map[string]error
+	commands       []string
 }
 
-func (r *recordingLaunchdRunner) run(name string, args ...string) ([]byte, error) {
+func (r *recordingCommandRunner) run(name string, args ...string) ([]byte, error) {
 	command := strings.TrimSpace(name + " " + strings.Join(args, " "))
 	r.commands = append(r.commands, command)
 	if err := r.failures[command]; err != nil {
 		return []byte(err.Error()), err
+	}
+	for prefix, err := range r.prefixFailures {
+		if strings.HasPrefix(command, prefix) {
+			return []byte(err.Error()), err
+		}
 	}
 	return nil, nil
 }
@@ -95,10 +101,10 @@ func (b *recordingNativeBackend) SupportError(Schedule) error {
 	return b.supportErr
 }
 
-func testLaunchdBackend(t *testing.T) (*launchdBackend, *recordingLaunchdRunner, string) {
+func testLaunchdBackend(t *testing.T) (*launchdBackend, *recordingCommandRunner, string) {
 	t.Helper()
 	home := t.TempDir()
-	runner := &recordingLaunchdRunner{failures: map[string]error{}}
+	runner := &recordingCommandRunner{failures: map[string]error{}, prefixFailures: map[string]error{}}
 	backend := &launchdBackend{
 		homeDir: func() (string, error) { return home, nil },
 		binaryPath: func() (string, error) {
@@ -117,6 +123,26 @@ func testLaunchdBackend(t *testing.T) (*launchdBackend, *recordingLaunchdRunner,
 		runCommand: runner.run,
 	}
 	return backend, runner, home
+}
+
+func testSchTasksBackend(t *testing.T) (*schtasksBackend, *recordingCommandRunner) {
+	t.Helper()
+	base := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(base, "LocalAppData"))
+	runner := &recordingCommandRunner{failures: map[string]error{}, prefixFailures: map[string]error{}}
+	backend := &schtasksBackend{
+		binaryPath: func() (string, error) {
+			return `C:\Program Files\Moxie\moxie.exe`, nil
+		},
+		currentUser: func() (string, error) {
+			return `DOMAIN\tester`, nil
+		},
+		now: func() time.Time {
+			return time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+		},
+		runCommand: runner.run,
+	}
+	return backend, runner
 }
 
 func testStoreWithBackends(t *testing.T, backends ...ScheduleBackend) *Store {
@@ -340,6 +366,133 @@ func TestAddFallsBackWhenLaunchdInstallFails(t *testing.T) {
 	}
 	if _, statErr := os.Stat(launchdSchedulePlistPath(home, sc.ID)); !os.IsNotExist(statErr) {
 		t.Fatalf("plist stat err = %v, want os.ErrNotExist", statErr)
+	}
+}
+
+func TestAddMaterializesThroughSchTasksWhenSupported(t *testing.T) {
+	schtasksBackend, runner := testSchTasksBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, schtasksBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedBySchTasks {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedBySchTasks)
+	}
+	if sc.Sync.State != SyncStateSynced {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateSynced)
+	}
+	if sc.Sync.Error != "" {
+		t.Fatalf("sync_error = %q, want empty", sc.Sync.Error)
+	}
+	if len(fallback.installs) != 0 {
+		t.Fatalf("fallback installs = %v, want none", fallback.installs)
+	}
+	if len(runner.commands) != 1 {
+		t.Fatalf("commands = %v, want 1 command", runner.commands)
+	}
+	wantPrefix := "schtasks /create /tn " + schtasksScheduleName(sc.ID) + " /xml "
+	if !strings.HasPrefix(runner.commands[0], wantPrefix) || !strings.HasSuffix(runner.commands[0], " /f") {
+		t.Fatalf("commands[0] = %q, want prefix %q and suffix /f", runner.commands[0], wantPrefix)
+	}
+	stored := readStoredScheduleRecord(t, store.path)
+	sync := decodeRawObject(t, stored["sync"], "stored sync")
+	if got := strings.Trim(string(sync["managed_by"]), `"`); got != ManagedBySchTasks {
+		t.Fatalf("stored managed_by = %q, want %q", got, ManagedBySchTasks)
+	}
+	if got := strings.Trim(string(sync["state"]), `"`); got != SyncStateSynced {
+		t.Fatalf("stored sync state = %q, want %q", got, SyncStateSynced)
+	}
+	due, err := store.Due(now.Add(3 * time.Hour))
+	if err != nil {
+		t.Fatalf("Due(): %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("Due() = %v, want no in-process Task Scheduler schedules", due)
+	}
+}
+
+func TestAddFallsBackWhenSchTasksCannotRepresentSchedule(t *testing.T) {
+	schtasksBackend, runner := testSchTasksBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, schtasksBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerCalendar,
+		Action:  ActionDispatch,
+		Cron:    "0 9 * 1,3 1-5",
+		Text:    "Run month-filtered weekday summary",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByInProcess)
+	}
+	if sc.Sync.State != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
+	}
+	if !strings.Contains(sc.Sync.Error, "month and day_of_week") {
+		t.Fatalf("sync_error = %q, want month/day_of_week reason", sc.Sync.Error)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("schtasks commands = %v, want none", runner.commands)
+	}
+	if len(fallback.installs) != 1 || fallback.installs[0] != sc.ID {
+		t.Fatalf("fallback installs = %v, want [%s]", fallback.installs, sc.ID)
+	}
+}
+
+func TestAddFallsBackWhenSchTasksInstallFails(t *testing.T) {
+	schtasksBackend, runner := testSchTasksBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, schtasksBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.buildSchedule(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	}, now)
+	if err != nil {
+		t.Fatalf("buildSchedule(): %v", err)
+	}
+	runner.prefixFailures["schtasks /create /tn "+schtasksScheduleName(sc.ID)+" /xml "] = errors.New("create failed")
+
+	sc, err = store.Add(AddInput{
+		Trigger: TriggerInterval,
+		Action:  ActionDispatch,
+		Every:   "90m",
+		Text:    "Run cleanup",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByInProcess)
+	}
+	if sc.Sync.State != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
+	}
+	if !strings.Contains(sc.Sync.Error, "create failed") {
+		t.Fatalf("sync_error = %q, want create failure", sc.Sync.Error)
+	}
+	if len(fallback.installs) != 1 || fallback.installs[0] != sc.ID {
+		t.Fatalf("fallback installs = %v, want [%s]", fallback.installs, sc.ID)
 	}
 }
 

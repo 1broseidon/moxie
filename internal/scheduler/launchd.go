@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -37,11 +36,11 @@ type launchdTriggerSpec struct {
 func newLaunchdBackend() ScheduleBackend {
 	return &launchdBackend{
 		homeDir:    os.UserHomeDir,
-		binaryPath: resolveLaunchdBinaryPath,
+		binaryPath: resolveScheduleBinaryPath,
 		now:        time.Now,
 		uid:        os.Getuid,
 		env:        launchdScheduleEnvironment,
-		runCommand: runLaunchdCommand,
+		runCommand: runCombinedCommand,
 	}
 }
 
@@ -452,24 +451,6 @@ func launchdServiceTarget(uid int, label string) string {
 	return launchdDomainTarget(uid) + "/" + label
 }
 
-func resolveLaunchdBinaryPath() (string, error) {
-	if path, err := exec.LookPath("moxie"); err == nil && strings.TrimSpace(path) != "" {
-		if filepath.IsAbs(path) {
-			return path, nil
-		}
-		abs, absErr := filepath.Abs(path)
-		if absErr == nil {
-			return abs, nil
-		}
-		return path, nil
-	}
-	exe, err := os.Executable()
-	if err != nil || strings.TrimSpace(exe) == "" {
-		return "", fmt.Errorf("failed to locate moxie binary: %w", err)
-	}
-	return exe, nil
-}
-
 func launchdScheduleEnvironment() map[string]string {
 	env := map[string]string{
 		"PATH": os.Getenv("PATH"),
@@ -479,11 +460,6 @@ func launchdScheduleEnvironment() map[string]string {
 		env["PATH"] = launchdScheduleDefaultPATH
 	}
 	return env
-}
-
-func runLaunchdCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	return cmd.CombinedOutput()
 }
 
 func xmlEscape(s string) string {

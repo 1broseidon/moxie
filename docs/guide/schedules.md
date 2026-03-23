@@ -27,9 +27,12 @@ Current platform behavior:
 - macOS: supported one-shot, interval, and portable calendar schedules are installed as per-user `launchd` jobs
 - macOS fallback: second-precision one-shots, far-future one-shots that need explicit year precision, and calendar shapes that do not map cleanly to `launchd` stay on the in-process scheduler automatically, and the fallback reason is recorded in schedule sync metadata
 - Linux: native timer integration is not implemented yet
-- Windows: schedules are not yet backed by Task Scheduler
+- Windows: supported one-shot schedules, intervals up to 31 days, and portable calendar schedules with explicit minute/hour values are installed as per-user Task Scheduler jobs automatically
+- Windows fallback: calendar schedules with wildcard minute/hour fields, month-filtered weekday schedules, or shapes that expand to too many native triggers stay on the in-process scheduler automatically, and the fallback reason is recorded in schedule sync metadata
 
-Linux and Windows still rely on Moxie's in-process scheduler, so on those platforms you must keep `moxie serve` running if you want schedules to keep firing.
+Linux still relies on Moxie's in-process scheduler, so on Linux you must keep `moxie serve` running if you want schedules to keep firing.
+
+On Windows, supported native schedules fire through Task Scheduler without a separate sync/install step, but they currently register with the current interactive user token. That means native Windows schedules run while that user is signed in; unsupported schedules still fall back to the in-process scheduler and therefore still depend on `moxie serve`.
 
 Use `--in` for a one-time relative reminder and `--every` for a repeating elapsed-time interval.
 
