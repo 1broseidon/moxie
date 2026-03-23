@@ -25,7 +25,7 @@ Moxie keeps one portable schedule model across platforms and now materializes su
 Current platform behavior:
 
 - macOS: supported one-shot, interval, and portable calendar schedules are installed as per-user `launchd` jobs
-- macOS fallback: second-precision one-shots and calendar shapes that do not map cleanly to `launchd` stay on the in-process scheduler automatically, and the fallback reason is recorded in schedule sync metadata
+- macOS fallback: second-precision one-shots, far-future one-shots that need explicit year precision, and calendar shapes that do not map cleanly to `launchd` stay on the in-process scheduler automatically, and the fallback reason is recorded in schedule sync metadata
 - Linux: native timer integration is not implemented yet
 - Windows: schedules are not yet backed by Task Scheduler
 

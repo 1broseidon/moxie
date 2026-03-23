@@ -23,6 +23,7 @@ const (
 type launchdBackend struct {
 	homeDir    func() (string, error)
 	binaryPath func() (string, error)
+	now        func() time.Time
 	uid        func() int
 	env        func() map[string]string
 	runCommand func(name string, args ...string) ([]byte, error)
@@ -37,6 +38,7 @@ func newLaunchdBackend() ScheduleBackend {
 	return &launchdBackend{
 		homeDir:    os.UserHomeDir,
 		binaryPath: resolveLaunchdBinaryPath,
+		now:        time.Now,
 		uid:        os.Getuid,
 		env:        launchdScheduleEnvironment,
 		runCommand: runLaunchdCommand,
@@ -156,6 +158,9 @@ func (b *launchdBackend) triggerSpec(sc Schedule) (launchdTriggerSpec, error) {
 		if !when.Equal(when.Truncate(time.Minute)) {
 			return launchdTriggerSpec{}, fmt.Errorf("launchd one-shot schedules require minute precision")
 		}
+		if !launchdAtTimeRepresentable(when, b.currentTime().In(time.Local)) {
+			return launchdTriggerSpec{}, fmt.Errorf("launchd one-shot schedules cannot preserve year precision for this timestamp")
+		}
 		return launchdTriggerSpec{
 			calendar: []map[string]int{{
 				"Minute": when.Minute(),
@@ -183,6 +188,37 @@ func (b *launchdBackend) triggerSpec(sc Schedule) (launchdTriggerSpec, error) {
 	default:
 		return launchdTriggerSpec{}, fmt.Errorf("launchd does not support trigger %q", sc.Spec.Trigger)
 	}
+}
+
+func (b *launchdBackend) currentTime() time.Time {
+	if b != nil && b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+func launchdAtTimeRepresentable(when, now time.Time) bool {
+	loc := when.Location()
+	now = now.In(loc)
+	for year := now.Year(); year <= when.Year(); year++ {
+		candidate, ok := launchdAnnualOccurrence(year, when, loc)
+		if !ok || candidate.Before(now) {
+			continue
+		}
+		return candidate.Equal(when)
+	}
+	return false
+}
+
+func launchdAnnualOccurrence(year int, when time.Time, loc *time.Location) (time.Time, bool) {
+	candidate := time.Date(year, when.Month(), when.Day(), when.Hour(), when.Minute(), 0, 0, loc)
+	if candidate.Year() != year || candidate.Month() != when.Month() || candidate.Day() != when.Day() {
+		return time.Time{}, false
+	}
+	if candidate.Hour() != when.Hour() || candidate.Minute() != when.Minute() {
+		return time.Time{}, false
+	}
+	return candidate, true
 }
 
 func launchdCalendarIntervals(calendar *CalendarSpec) ([]map[string]int, error) {

@@ -7,7 +7,11 @@ import (
 )
 
 func TestLaunchdTriggerSpecTranslatesAtSchedule(t *testing.T) {
-	backend := &launchdBackend{}
+	backend := &launchdBackend{
+		now: func() time.Time {
+			return time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+		},
+	}
 	sc := Schedule{
 		ID: "sch-at",
 		Spec: ScheduleSpec{
@@ -35,7 +39,11 @@ func TestLaunchdTriggerSpecTranslatesAtSchedule(t *testing.T) {
 }
 
 func TestLaunchdTriggerSpecRejectsAtScheduleWithSeconds(t *testing.T) {
-	backend := &launchdBackend{}
+	backend := &launchdBackend{
+		now: func() time.Time {
+			return time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+		},
+	}
 	sc := Schedule{
 		ID: "sch-at-seconds",
 		Spec: ScheduleSpec{
@@ -46,6 +54,25 @@ func TestLaunchdTriggerSpecRejectsAtScheduleWithSeconds(t *testing.T) {
 
 	if _, err := backend.triggerSpec(sc); err == nil || !strings.Contains(err.Error(), "minute precision") {
 		t.Fatalf("triggerSpec() err = %v, want minute precision error", err)
+	}
+}
+
+func TestLaunchdTriggerSpecRejectsAtScheduleThatNeedsYearPrecision(t *testing.T) {
+	backend := &launchdBackend{
+		now: func() time.Time {
+			return time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+		},
+	}
+	sc := Schedule{
+		ID: "sch-at-far-future",
+		Spec: ScheduleSpec{
+			Trigger: TriggerAt,
+			At:      time.Date(2028, 4, 1, 10, 15, 0, 0, time.FixedZone("CDT", -5*60*60)),
+		},
+	}
+
+	if _, err := backend.triggerSpec(sc); err == nil || !strings.Contains(err.Error(), "year precision") {
+		t.Fatalf("triggerSpec() err = %v, want year precision error", err)
 	}
 }
 

@@ -104,6 +104,9 @@ func testLaunchdBackend(t *testing.T) (*launchdBackend, *recordingLaunchdRunner,
 		binaryPath: func() (string, error) {
 			return "/usr/local/bin/moxie", nil
 		},
+		now: func() time.Time {
+			return time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+		},
 		uid: func() int { return 501 },
 		env: func() map[string]string {
 			return map[string]string{
@@ -258,6 +261,39 @@ func TestAddFallsBackWhenLaunchdCannotRepresentSchedule(t *testing.T) {
 	}
 	if got := strings.Trim(string(sync["error"]), `"`); !strings.Contains(got, "minute precision") {
 		t.Fatalf("stored sync error = %q, want minute precision reason", got)
+	}
+}
+
+func TestAddFallsBackWhenLaunchdAtScheduleNeedsYearPrecision(t *testing.T) {
+	launchdBackend, runner, _ := testLaunchdBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, launchdBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerAt,
+		Action:  ActionSend,
+		At:      "2028-04-01T10:00:00-05:00",
+		Text:    "Review annual plan",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if sc.Sync.ManagedBy != ManagedByInProcess {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByInProcess)
+	}
+	if sc.Sync.State != SyncStateFallback {
+		t.Fatalf("sync_state = %q, want %q", sc.Sync.State, SyncStateFallback)
+	}
+	if !strings.Contains(sc.Sync.Error, "year precision") {
+		t.Fatalf("sync_error = %q, want year precision reason", sc.Sync.Error)
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("launchd commands = %v, want none", runner.commands)
+	}
+	if len(fallback.installs) != 1 || fallback.installs[0] != sc.ID {
+		t.Fatalf("fallback installs = %v, want [%s]", fallback.installs, sc.ID)
 	}
 }
 
