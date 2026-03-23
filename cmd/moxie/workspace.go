@@ -77,8 +77,35 @@ func resolveServeDefaultCWD(cfg store.Config, explicit string) (string, error) {
 	if trimmed := strings.TrimSpace(explicit); trimmed != "" {
 		return resolveDir(trimmed)
 	}
-	if cwd, err := os.Getwd(); err == nil && isMeaningfulWorkingDir(cwd) {
+	if cwd, err := logicalWorkingDir(); err == nil && isMeaningfulWorkingDir(cwd) {
 		return cwd, nil
 	}
 	return configuredOrPlatformDefaultCWD(cfg)
+}
+
+func logicalWorkingDir() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	pwd := strings.TrimSpace(os.Getenv("PWD"))
+	if pwd == "" {
+		return cwd, nil
+	}
+	logical, err := resolveDir(pwd)
+	if err != nil {
+		return cwd, nil
+	}
+	logicalInfo, err := os.Stat(logical)
+	if err != nil {
+		return cwd, nil
+	}
+	cwdInfo, err := os.Stat(cwd)
+	if err != nil {
+		return cwd, nil
+	}
+	if os.SameFile(logicalInfo, cwdInfo) {
+		return logical, nil
+	}
+	return cwd, nil
 }

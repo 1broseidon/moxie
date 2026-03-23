@@ -271,9 +271,28 @@ func newStoreWithBackends(path string, loc *time.Location, backends *backendReco
 	return &Store{path: path, loc: loc, backends: backends}
 }
 
+func (s *Store) lockPath() string {
+	return s.path + ".lock"
+}
+
+func (s *Store) lockMutationFile() (func(), error) {
+	lock, err := acquireFileLock(s.lockPath())
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = releaseFileLock(lock)
+	}, nil
+}
+
 func (s *Store) Add(input AddInput) (Schedule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutationFile()
+	if err != nil {
+		return Schedule{}, err
+	}
+	defer unlock()
 
 	schedules, err := s.load()
 	if err != nil {
@@ -333,6 +352,11 @@ func (s *Store) Get(id string) (Schedule, error) {
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutationFile()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	schedules, err := s.load()
 	if err != nil {
@@ -393,6 +417,11 @@ func (s *Store) Due(now time.Time) ([]Schedule, error) {
 func (s *Store) AttachJob(id, jobID string) (Schedule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutationFile()
+	if err != nil {
+		return Schedule{}, err
+	}
+	defer unlock()
 
 	if strings.TrimSpace(jobID) == "" {
 		return Schedule{}, fmt.Errorf("job id cannot be empty")
@@ -422,6 +451,11 @@ func (s *Store) AttachJob(id, jobID string) (Schedule, error) {
 func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutationFile()
+	if err != nil {
+		return Schedule{}, err
+	}
+	defer unlock()
 
 	schedules, err := s.load()
 	if err != nil {
@@ -467,6 +501,11 @@ func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, erro
 func (s *Store) Repair(jobExists func(string) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := s.lockMutationFile()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	schedules, err := s.load()
 	if err != nil {
