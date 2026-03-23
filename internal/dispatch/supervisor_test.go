@@ -121,6 +121,75 @@ func TestProcessJobSupervisedSubagentSuccess(t *testing.T) {
 	}
 }
 
+func TestProcessJobSupervisedSubagentAllowsHeartbeatOnlyRunWhenProgressTimeoutDisabled(t *testing.T) {
+	useTempStoreDir(t)
+	writeSupervisionConfig(t, 1, "250ms", "0s", "0s")
+
+	restorePoll := dispatch.SetSupervisionPollIntervalForTest(5 * time.Millisecond)
+	t.Cleanup(restorePoll)
+
+	release := make(chan struct{})
+	var attempts int
+	restoreRun := dispatch.SetRunStreamModelFuncForTest(func(ctx context.Context, job *store.PendingJob, _ *oneagent.Client, emit func(oneagent.StreamEvent)) oneagent.Response {
+		attempts++
+		emit(oneagent.StreamEvent{Type: "start", RunID: "run-heartbeat", TS: time.Now().UTC(), ThreadID: job.State.ThreadID})
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-release:
+				return oneagent.Response{Result: "heartbeat-ok", Backend: job.State.Backend, ThreadID: job.State.ThreadID}
+			case <-ctx.Done():
+				return oneagent.Response{Error: ctx.Err().Error(), Backend: job.State.Backend, ThreadID: job.State.ThreadID}
+			case ts := <-ticker.C:
+				emit(oneagent.StreamEvent{Type: "heartbeat", RunID: "run-heartbeat", TS: ts.UTC(), ThreadID: job.State.ThreadID})
+			}
+		}
+	})
+	t.Cleanup(restoreRun)
+
+	job := &store.PendingJob{
+		ID:             "job-supervised-heartbeat-only",
+		ConversationID: "telegram:1",
+		Source:         "subagent",
+		Prompt:         "allow heartbeat-only runs when progress timeout is disabled",
+		State:          store.State{Backend: "claude", ThreadID: "sub-thread"},
+	}
+
+	done := make(chan struct{})
+	var gotResult string
+	go dispatch.ProcessJob(job, &oneagent.Client{}, nil, dispatch.Callbacks{
+		OnResult: func(result string) error {
+			gotResult = result
+			return nil
+		},
+		OnDone: func() {
+			close(done)
+		},
+	})
+
+	select {
+	case <-done:
+		t.Fatal("job finished early; progress timeout should be disabled")
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for heartbeat-only job to finish")
+	}
+
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+	if gotResult != "heartbeat-ok" {
+		t.Fatalf("result = %q, want heartbeat-ok", gotResult)
+	}
+}
+
 func TestProcessJobSupervisedSubagentRetriesOnProgressStall(t *testing.T) {
 	useTempStoreDir(t)
 	writeSupervisionConfig(t, 2, "250ms", "30ms", "0s", "0s")

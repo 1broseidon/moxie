@@ -146,7 +146,7 @@ func TestSubagentSupervisionDefaultsAndInvalidValues(t *testing.T) {
 	cfg = Config{
 		SubagentMaxAttempts:     -1,
 		SubagentStallTimeout:    "bad",
-		SubagentProgressTimeout: "0s",
+		SubagentProgressTimeout: "bad",
 		SubagentRetryBackoff:    []string{"", "bad", "-1s"},
 	}
 	if cfg.MaxSubagentAttempts() != defaultSubagentMaxAttempts {
@@ -158,6 +158,12 @@ func TestSubagentSupervisionDefaultsAndInvalidValues(t *testing.T) {
 	if cfg.SubagentProgressDuration() != defaultSubagentProgressTimeout {
 		t.Fatalf("SubagentProgressDuration() invalid fallback = %v, want %v", cfg.SubagentProgressDuration(), defaultSubagentProgressTimeout)
 	}
+
+	cfg.SubagentProgressTimeout = "0s"
+	if cfg.SubagentProgressDuration() != 0 {
+		t.Fatalf("SubagentProgressDuration() disable = %v, want 0", cfg.SubagentProgressDuration())
+	}
+
 	gotBackoff = cfg.SubagentRetryBackoffDurations()
 	if len(gotBackoff) != len(defaultSubagentRetryBackoff) {
 		t.Fatalf("SubagentRetryBackoffDurations() invalid fallback len = %d, want %d", len(gotBackoff), len(defaultSubagentRetryBackoff))

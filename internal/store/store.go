@@ -16,7 +16,7 @@ const (
 	defaultSubagentMaxDepth        = 3
 	defaultSubagentMaxAttempts     = 3
 	defaultSubagentStallTimeout    = 5 * time.Minute
-	defaultSubagentProgressTimeout = 2 * time.Minute
+	defaultSubagentProgressTimeout = 0 * time.Minute
 )
 
 var defaultSubagentRetryBackoff = []time.Duration{0, 30 * time.Second, 2 * time.Minute}
@@ -169,7 +169,7 @@ func (cfg Config) SubagentStallDuration() time.Duration {
 }
 
 func (cfg Config) SubagentProgressDuration() time.Duration {
-	return parseConfigDuration(cfg.SubagentProgressTimeout, defaultSubagentProgressTimeout)
+	return parseOptionalConfigDuration(cfg.SubagentProgressTimeout, defaultSubagentProgressTimeout)
 }
 
 func (cfg Config) SubagentRetryBackoffDurations() []time.Duration {
@@ -196,6 +196,18 @@ func parseConfigDuration(raw string, fallback time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
+}
+
+func parseOptionalConfigDuration(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
 		return fallback
 	}
 	return d
