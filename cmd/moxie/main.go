@@ -1951,6 +1951,7 @@ func buildSynthesisPrompt(delegationCtx, task, backend, result string) string {
 	b.WriteString("\n\nResult:\n")
 	b.WriteString(result)
 	b.WriteString("\n\nSynthesize this result for the user. Reference what they were working on when you delegated this task.")
+	b.WriteString("\nIf the conversation had a sequence of tasks still in progress, dispatch the next one using moxie subagent with the same backend and model. If this was the last task, the result needs human attention, or something went wrong, stop and tell the user.")
 	return b.String()
 }
 
