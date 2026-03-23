@@ -23,6 +23,8 @@ go install github.com/1broseidon/moxie/cmd/moxie@latest
 
 The recommended path is Telegram plus service install during `moxie init`.
 
+Note: the service-first flow currently applies to Linux and macOS. On Windows, native service install/control is still not implemented, so foreground `moxie serve` remains the way to keep chat handling running. Supported schedules are still materialized into Task Scheduler automatically, while unsupported schedule shapes fall back to the in-process scheduler.
+
 ### 1. Create a Telegram bot
 
 Open [BotFather](https://t.me/BotFather) in Telegram and send `/newbot`. Give it a name and a username ending in `bot`. Copy the token it returns.
@@ -45,7 +47,9 @@ moxie init
 
 Paste your bot token and chat ID when prompted. Init also asks for a default workspace path, writes everything to `~/.config/moxie/config.json`, and can install and start Moxie as a background service for you.
 
-### 4. Preferred: let init install the service
+For the preferred quick start, just say yes to service install/start during `moxie init`.
+
+### 4. Verify the service if needed
 
 If you said yes during `moxie init`, Moxie should already be running in the background. You can confirm with:
 
@@ -55,13 +59,13 @@ moxie service status
 
 ### 5. Manual fallback: run in the foreground
 
-If you skipped service install, you can still run Moxie manually:
+If you intentionally skipped service install, you can still run Moxie manually:
 
 ```bash
 moxie serve
 ```
 
-Running `moxie serve` from inside a project is useful when you want that shell directory to become the active default working directory.
+Use foreground `moxie serve` mainly when you want Moxie tied to the current shell directory for project-local work.
 
 Send a message to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
 

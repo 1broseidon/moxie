@@ -14,7 +14,7 @@ Requires Go 1.24+ and at least one agent CLI installed (see [Agent backends](#ag
 
 ## Quick start (Telegram)
 
-The recommended path is to let Moxie install itself as a background service during init.
+The recommended path is to let Moxie install itself as a background service during init on Linux or macOS. On Windows, use `moxie init` plus foreground `moxie serve` for now.
 
 1. **Create a Telegram bot** — open [BotFather](https://t.me/BotFather), send `/newbot`, copy the token.
 
@@ -311,6 +311,10 @@ moxie service restart
 moxie service reload
 moxie service status
 ```
+
+### Windows status
+
+Windows still does not have native `moxie service install` / service control support, so chat handling still relies on foreground `moxie serve`. Supported schedules are materialized into per-user Task Scheduler jobs automatically with no separate sync step, and unsupported shapes fall back to Moxie's in-process scheduler with the fallback reason recorded in schedule metadata. Windows native schedules currently use the interactive user token, so they run while that user is signed in.
 
 ### serve flags
 
