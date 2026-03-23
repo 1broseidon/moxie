@@ -6,12 +6,11 @@ All notable changes to Moxie are documented here.
 
 ### Added
 
-- Schedule abstraction with canonical trigger model, `--every` interval UX, `fire` execution entrypoint, and backend reconciliation layer
-- macOS launchd schedule backend with one-shot year-precision guard and fallback-reason preservation
-- Windows Task Scheduler schedule backend (tolerates missing deletes on cleanup)
-- Portable cron normalization for cross-platform schedule definitions
-- `moxie subagent list`, `show`, and `cancel` subcommands for managing background work
-- Synthesis continuation loop — sequential tasks now auto-dispatch the next step instead of stopping after summary
+- **Schedule abstraction** — canonical trigger model, `--every` interval UX, `fire` execution entrypoint, backend reconciliation layer, and portable cron normalization
+- **macOS launchd schedule backend** with one-shot year-precision guard and fallback-reason preservation
+- **Windows Task Scheduler schedule backend** with tolerant delete handling on cleanup
+- **`moxie subagent list`**, **`show`**, and **`cancel`** subcommands for inspecting and managing background work
+- **Synthesis continuation loop** — when a user requests multiple sequential tasks, the synthesis step now automatically dispatches the next task instead of just summarizing and stopping
 
 ### Changed
 
@@ -20,25 +19,7 @@ All notable changes to Moxie are documented here.
 
 ### Fixed
 
-- Hardened continuation loop to avoid duplicate dispatches and handle edge cases from code review
-
-## [0.2.1] - 2026-03-22
-
-### Added
-
-- Synthesis continuation loop: when a user requests multiple sequential tasks, the synthesis step now automatically dispatches the next task instead of just summarizing and stopping
-- `moxie subagent list`, `moxie subagent show`, and `moxie subagent cancel` commands for inspecting and managing running subagent jobs
-
-### Changed
-
-- Schedule abstraction with first-class `--every` interval UX, canonical trigger model, cron normalization, backend reconciliation, and `fire` execution entrypoint
-- macOS launchd schedule backend with one-shot year precision guard and fallback reason preservation
-- Windows Task Scheduler schedule backend with tolerant delete handling
-- Progress stall timeout now disabled by default for dispatched subagents
-
-### Fixed
-
-- Hardened synthesis continuation loop per code review feedback
+- Hardened synthesis continuation loop to avoid duplicate dispatches and handle edge cases per code review
 
 ## [0.2.0] - 2026-03-22
 
