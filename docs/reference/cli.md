@@ -39,6 +39,8 @@ moxie messages [--json|--raw] [-n N]
 
 Manage scheduled messages and dispatches.
 
+Supported schedules are materialized automatically into native backends on macOS (`launchd`) and Windows (Task Scheduler) when possible. Unsupported shapes fall back to Moxie's in-process scheduler. Linux currently uses the in-process scheduler only.
+
 ```bash
 moxie schedule add [flags]      # Create a schedule
 moxie schedule list             # List all schedules
@@ -46,22 +48,30 @@ moxie schedule show <id>        # Show schedule details
 moxie schedule rm <id>          # Delete a schedule
 ```
 
+Use `--conversation <provider:channel[:thread]>` to target a specific conversation directly, or `--transport <telegram|slack>` to use that transport's configured default conversation. If only one transport is configured, `--transport` can be omitted.
+
 #### `schedule add` flags
 
 | Flag | Description |
 |------|-------------|
-| `--transport` | Target transport (`telegram` or `slack`) |
-| `--conversation` | Target a specific conversation ID |
+| `--transport` | Use the configured default conversation for one transport |
+| `--conversation` | Target a specific conversation ID directly |
 | `--action` | Required: `send` or `dispatch` |
 | `--in` | Relative one-shot delay (e.g. `5m`, `2h`) |
-| `--at` | Absolute one-shot time (RFC 3339) |
+| `--at` | Exact one-shot time. Accepts RFC 3339, `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DD HH:MM` |
 | `--every` | Recurring elapsed-time interval (e.g. `15m`, `2h`) |
-| `--cron` | Recurring cron expression |
-| `--text` | Message or prompt text |
+| `--cron` | Recurring portable 5-field cron expression |
+| `--text` | Required message or prompt text |
 | `--backend` | Override backend for `dispatch` schedules |
 | `--model` | Override model for `dispatch` schedules |
 | `--thread` | Override thread for `dispatch` schedules |
 | `--cwd` | Override working directory for `dispatch` schedules |
+
+Use exactly one of `--in`, `--at`, `--every`, or `--cron`.
+
+For `dispatch` schedules, Moxie captures the current backend, model, thread, and working directory at creation time unless you override them explicitly. `send` schedules ignore those dispatch-specific overrides.
+
+`moxie schedule show <id>` includes sync metadata such as `Managed by`, `Sync state`, and `Sync error` when applicable, which is how you can see whether a schedule is running natively or via the in-process fallback.
 
 ### `moxie subagent`
 
@@ -122,7 +132,17 @@ On Windows, `moxie service install` and the related service control commands are
 
 ## Operator Commands
 
-These commands are mainly for Telegram transport troubleshooting and scripted intake tests. Most users should not need them during normal use.
+These commands are mainly for Telegram transport troubleshooting, scripted intake tests, and native schedule plumbing. Most users should not need them during normal use.
+
+### `moxie schedule fire`
+
+Run a schedule immediately by ID.
+
+```bash
+moxie schedule fire <id>
+```
+
+This is primarily internal/operator plumbing used by native `launchd` and Task Scheduler entries. Normal schedule management should go through `moxie schedule add`, `list`, `show`, and `rm`.
 
 ### `moxie poll`
 

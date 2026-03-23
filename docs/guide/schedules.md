@@ -2,6 +2,17 @@
 
 Schedule one-time or recurring messages and agent dispatches.
 
+Moxie keeps one portable schedule model across platforms. After `moxie schedule add`, supported schedules are materialized automatically into native backends on macOS (`launchd`) and Windows (Task Scheduler). Unsupported shapes fall back to Moxie's in-process scheduler, and the fallback reason is recorded in schedule sync metadata.
+
+## Targeting a schedule
+
+Target a schedule in one of two ways:
+
+- `--conversation <provider:channel[:thread]>` to schedule directly into a specific conversation
+- `--transport <telegram|slack>` to use that transport's configured default conversation
+
+If only one transport is configured, `--transport` can be omitted.
+
 ## Actions
 
 | Action | Description |
@@ -16,25 +27,25 @@ Use exactly one trigger per schedule:
 | Flag | Description | Example |
 |------|-------------|---------|
 | `--in` | Relative one-shot delay from now | `--in 5m`, `--in 2h` |
-| `--at` | Absolute one-shot time (RFC 3339) | `--at 2026-03-20T10:00:00-05:00` |
+| `--at` | Absolute one-shot time. Accepts RFC 3339, `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DD HH:MM` | `--at 2026-03-20T10:00:00-05:00` |
 | `--every` | Recurring elapsed-time interval | `--every 15m`, `--every 2h` |
 | `--cron` | Recurring cron expression | `--cron "0 1 * * *"` |
 
-Moxie keeps one portable schedule model across platforms and now materializes supported schedules into native `launchd` jobs on macOS automatically. No separate install or sync step is required after `moxie schedule add`.
+Schedules use the system local timezone by default. `--every` uses elapsed-time semantics; `--cron` uses recurring wall-clock calendar semantics.
 
-Current platform behavior:
+## Platform behavior
 
-- macOS: supported one-shot, interval, and portable calendar schedules are installed as per-user `launchd` jobs
-- macOS fallback: second-precision one-shots, far-future one-shots that need explicit year precision, and calendar shapes that do not map cleanly to `launchd` stay on the in-process scheduler automatically, and the fallback reason is recorded in schedule sync metadata
-- Linux: native timer integration is not implemented yet
-- Windows: supported one-shot schedules, intervals up to 31 days, and portable calendar schedules with explicit minute/hour values are installed as per-user Task Scheduler jobs automatically
-- Windows fallback: calendar schedules with wildcard minute/hour fields, month-filtered weekday schedules, or shapes that expand to too many native triggers stay on the in-process scheduler automatically, and the fallback reason is recorded in schedule sync metadata
+- macOS: supported minute-precision one-shot schedules, interval schedules, and portable calendar schedules are installed automatically as per-user `launchd` jobs
+- macOS fallback: second-precision one-shots, far-future one-shots that need explicit year precision, and calendar shapes that do not map cleanly to `launchd` stay on the in-process scheduler automatically
+- Windows: supported one-shot schedules, intervals up to 31 days, and portable calendar schedules with explicit minute/hour values are installed automatically as per-user Task Scheduler jobs
+- Windows fallback: calendar schedules with wildcard minute/hour fields, month-filtered weekday schedules, or shapes that expand to too many native triggers stay on the in-process scheduler automatically
+- Linux: native timer integration is not implemented yet, so schedules run on Moxie's in-process scheduler only
 
-Linux still relies on Moxie's in-process scheduler, so on Linux you must keep `moxie serve` running if you want schedules to keep firing.
+On Linux, you must keep `moxie serve` running if you want schedules to keep firing.
 
-On Windows, supported native schedules fire through Task Scheduler without a separate sync/install step, but they currently register with the current interactive user token. That means native Windows schedules run while that user is signed in; unsupported schedules still fall back to the in-process scheduler and therefore still depend on `moxie serve`.
+On Windows, native schedules currently register with the current interactive user token, so supported Task Scheduler schedules run while that user is signed in. Unsupported schedules still fall back to the in-process scheduler and therefore still depend on `moxie serve`.
 
-Use `--in` for a one-time relative reminder and `--every` for a repeating elapsed-time interval.
+Use `moxie schedule show <id>` to inspect sync details. When relevant, it shows fields such as `Managed by`, `Sync state`, and `Sync error` so you can tell whether a schedule is native or running via fallback.
 
 ## Portable cron subset
 
@@ -48,7 +59,7 @@ Supported portable forms:
 - exact values like `0 9 * * 1`
 - wildcards like `*`
 - safe lists and ranges like `1,3,5` or `MON-FRI`
-- named months/days such as `JAN` or `MON`
+- named months and days such as `JAN` or `MON`
 - safe descriptors that normalize into the portable form, such as `@daily`
 
 Notably rejected:
@@ -56,7 +67,7 @@ Notably rejected:
 - specials like `?`, `L`, `W`, `#`, and `@reboot`
 - cron expressions that restrict both day-of-month and day-of-week at the same time
 
-Moxie preserves the original cron string for display, while normalizing it internally into the canonical calendar fields used by the scheduler.
+Moxie preserves the original cron string for display while normalizing it internally into the canonical calendar fields used by the scheduler.
 
 ## Examples
 
@@ -112,14 +123,21 @@ moxie schedule add \
 
 ## Managing schedules
 
+Normal schedule management:
+
 ```bash
 moxie schedule list           # List all schedules
 moxie schedule show <id>      # Show details for a schedule
 moxie schedule rm <id>        # Delete a schedule
-moxie schedule fire <id>      # Internal/operator trigger path used by native backends
 ```
 
-`moxie schedule fire <id>` is primarily internal plumbing for operator use and future native scheduler backends. Normal schedule creation and execution still happen through `moxie schedule add ...` plus the existing runtime path.
+Internal/operator trigger path:
+
+```bash
+moxie schedule fire <id>
+```
+
+`moxie schedule fire <id>` is the internal execution path used by native `launchd` and Task Scheduler jobs. It is useful for operators and tests, but normal schedule usage should go through `moxie schedule add`, `list`, `show`, and `rm`.
 
 ## Dispatch context
 
@@ -136,4 +154,4 @@ moxie schedule add \
   --text "Weekly code review summary"
 ```
 
-Without overrides, the dispatch runs against whatever backend the conversation was using when the schedule was created.
+Without overrides, the dispatch runs against whatever backend the conversation was using when the schedule was created. `send` schedules ignore dispatch-specific overrides.

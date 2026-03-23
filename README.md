@@ -363,6 +363,10 @@ moxie schedule show <id>
 moxie schedule rm <id>
 ```
 
+Supported schedules are materialized automatically into per-user `launchd` jobs on macOS and per-user Task Scheduler jobs on Windows when possible. Unsupported schedule shapes fall back to Moxie's in-process scheduler.
+
+`moxie schedule fire <id>` exists as internal/operator plumbing used by those native backends. Most users should manage schedules through `add`, `list`, `show`, and `rm` instead.
+
 ## Subagents
 
 Delegate work to a different backend in the background:

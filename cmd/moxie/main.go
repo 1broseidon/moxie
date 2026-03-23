@@ -529,8 +529,10 @@ Usage:
   moxie schedule add [flags]
   moxie schedule list
   moxie schedule show <id>
-  moxie schedule fire <id>
   moxie schedule rm <id>
+
+Internal/operator:
+  moxie schedule fire <id>
 
 Flags for add:
   --transport <telegram|slack>                Use the configured default conversation for one transport
@@ -538,9 +540,9 @@ Flags for add:
   --action <send|dispatch>                    Send a fixed message or dispatch agent work
   --text <text>                               Message text or dispatch task
   --in <duration>                             Relative one-shot schedule like 5m, 2h, or 1d2h30m
-  --at <RFC3339 time>                         Exact one-shot timestamp with offset
+  --at <time>                                 Exact one-shot timestamp (RFC3339, YYYY-MM-DDTHH:MM, or YYYY-MM-DD HH:MM)
   --every <duration>                          Recurring interval schedule like 15m, 2h, or 24h
-  --cron <spec>                               Recurring cron schedule
+  --cron <spec>                               Recurring portable cron schedule
   --backend <name>                            Override captured backend for dispatch schedules
   --model <name>                              Override captured model for dispatch schedules
   --thread <id>                               Override captured thread for dispatch schedules
@@ -549,8 +551,9 @@ Flags for add:
 Notes:
   Use exactly one of --in, --at, --every, or --cron
   Use --conversation to target a specific provider conversation, or --transport to target the configured default conversation for one transport
+  If only one transport is configured, --transport can be omitted
   Dispatch schedules capture backend/model/thread/cwd at creation time
-  schedule fire is primarily internal/operator plumbing used by native scheduler backends
+  schedule fire is internal/operator plumbing used by native scheduler backends
 
 When to use:
   Only when explicitly asked to create, inspect, modify, or delete schedules
@@ -563,7 +566,8 @@ Examples:
   moxie schedule add --conversation slack:C123:1710000000.100 --action send --at 2026-03-18T10:00:00-05:00 --text "Call John"
   moxie schedule add --transport slack --action dispatch --cron "0 1 * * *" --text "Run a security scan"
   moxie schedule list
-  moxie schedule rm sch_123`)
+  moxie schedule show sch-123
+  moxie schedule rm sch-123`)
 }
 
 func subagentUsage() {
