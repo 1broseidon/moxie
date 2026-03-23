@@ -2,6 +2,14 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.5] - 2026-03-23
+
+### Fixed
+
+- Orphaned delivered schedule jobs are now dropped instead of retrying forever when their schedule has been removed
+- Cross-process file lock (`flock`) for schedule store mutations prevents concurrent write corruption between `moxie serve` and `moxie schedule fire`
+- macOS serve CWD resolution prefers logical `$PWD` over physical path to avoid `/private/var` symlink confusion
+
 ## [0.2.4] - 2026-03-23
 
 ### Changed
