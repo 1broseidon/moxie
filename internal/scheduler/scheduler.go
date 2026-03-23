@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	jobstore "github.com/1broseidon/moxie/internal/store"
 	"github.com/robfig/cron/v3"
 )
 
@@ -340,11 +343,12 @@ func (s *Store) Delete(id string) error {
 	var removed Schedule
 	for _, sc := range schedules {
 		if sc.ID == id {
-			if sc.RunningJobID != "" {
+			if sc.RunningJobID != "" && jobstore.JobExists(sc.RunningJobID) {
 				return fmt.Errorf("schedule %s is running via job %s", id, sc.RunningJobID)
 			}
 			found = true
 			removed = sc
+			removed.RunningJobID = ""
 			continue
 		}
 		next = append(next, sc)
@@ -524,6 +528,9 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 		if err != nil {
 			return Schedule{}, err
 		}
+		if strings.TrimSpace(input.In) != "" {
+			at = roundUpToMinute(at)
+		}
 		if !at.After(now) {
 			return Schedule{}, fmt.Errorf("scheduled time must be in the future")
 		}
@@ -551,15 +558,8 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 }
 
 func (s *Store) load() ([]Schedule, error) {
-	data, err := os.ReadFile(s.path)
+	doc, err := s.loadFileData()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var doc fileData
-	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
 	}
 	normalized, err := normalizeSchedules(doc.Schedules, s.loc, s.backends)
@@ -571,7 +571,7 @@ func (s *Store) load() ([]Schedule, error) {
 }
 
 func (s *Store) save(schedules []Schedule) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
 	normalized, err := normalizeSchedules(schedules, s.loc, s.backends)
@@ -584,7 +584,100 @@ func (s *Store) save(schedules []Schedule) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0600)
+	if err := writeFileAtomic(s.backupPath(), data, 0o600); err != nil {
+		return err
+	}
+	return writeFileAtomic(s.path, data, 0o600)
+}
+
+func (s *Store) backupPath() string {
+	return s.path + ".bak"
+}
+
+func (s *Store) loadFileData() (fileData, error) {
+	doc, err := readScheduleFileData(s.path)
+	if err == nil {
+		return doc, nil
+	}
+	backupPath := s.backupPath()
+	backup, backupErr := readScheduleFileData(backupPath)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if errors.Is(backupErr, os.ErrNotExist) {
+			return fileData{}, nil
+		}
+		if backupErr != nil {
+			return fileData{}, backupErr
+		}
+		log.Printf("warning: schedule store %s missing; using backup %s", s.path, backupPath)
+		return backup, nil
+	default:
+		log.Printf("warning: failed to load schedule store %s: %v", s.path, err)
+		if backupErr != nil {
+			return fileData{}, fmt.Errorf("load schedule store %s: %w (backup %s: %v)", s.path, err, backupPath, backupErr)
+		}
+		log.Printf("warning: using schedule store backup %s", backupPath)
+		return backup, nil
+	}
+}
+
+func readScheduleFileData(path string) (fileData, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fileData{}, err
+	}
+	var doc fileData
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return fileData{}, err
+	}
+	return doc, nil
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) (err error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = replaceFile(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
+}
+
+func replaceFile(src, dst string) error {
+	renameErr := os.Rename(src, dst)
+	if renameErr == nil {
+		return nil
+	}
+	if runtime.GOOS != "windows" {
+		return renameErr
+	}
+	if removeErr := os.Remove(dst); removeErr != nil && !os.IsNotExist(removeErr) {
+		return renameErr
+	}
+	return os.Rename(src, dst)
 }
 
 func normalizeSchedules(schedules []Schedule, loc *time.Location, backends *backendReconciler) ([]Schedule, error) {
@@ -733,6 +826,14 @@ func resolveAt(atRaw, inRaw string, now time.Time, loc *time.Location) (time.Tim
 	default:
 		return time.Time{}, fmt.Errorf("at time cannot be empty")
 	}
+}
+
+func roundUpToMinute(at time.Time) time.Time {
+	truncated := at.Truncate(time.Minute)
+	if at.Equal(truncated) {
+		return at
+	}
+	return truncated.Add(time.Minute)
 }
 
 func parseIn(raw string) (time.Duration, error) {

@@ -246,6 +246,53 @@ func TestAddMaterializesThroughLaunchdWhenSupported(t *testing.T) {
 	}
 }
 
+func TestAddRelativeOneShotRoundsUpAndSyncsToLaunchd(t *testing.T) {
+	launchdBackend, runner, home := testLaunchdBackend(t)
+	fallback := &recordingInProcessBackend{}
+	store := testStoreWithBackends(t, launchdBackend, fallback)
+	now := time.Date(2026, 3, 17, 21, 0, 30, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerAt,
+		Action:  ActionSend,
+		In:      "2m",
+		Text:    "Call John",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	wantAt := time.Date(2026, 3, 17, 21, 3, 0, 0, now.Location())
+	if !sc.Spec.At.Equal(wantAt) {
+		t.Fatalf("at = %v, want %v", sc.Spec.At, wantAt)
+	}
+	if sc.Sync.ManagedBy != ManagedByLaunchd {
+		t.Fatalf("managed_by = %q, want %q", sc.Sync.ManagedBy, ManagedByLaunchd)
+	}
+	if len(fallback.installs) != 0 {
+		t.Fatalf("fallback installs = %v, want none", fallback.installs)
+	}
+	plistPath := launchdSchedulePlistPath(home, sc.ID)
+	wantBootstrap := "launchctl bootstrap gui/501 " + plistPath
+	if len(runner.commands) != 1 || runner.commands[0] != wantBootstrap {
+		t.Fatalf("commands = %v, want [%q]", runner.commands, wantBootstrap)
+	}
+	content, err := os.ReadFile(plistPath)
+	if err != nil {
+		t.Fatalf("read plist: %v", err)
+	}
+	for _, needle := range []string{
+		"<key>Minute</key>",
+		"<integer>3</integer>",
+		"<key>Hour</key>",
+		"<integer>21</integer>",
+	} {
+		if !strings.Contains(string(content), needle) {
+			t.Fatalf("plist missing %q: %s", needle, string(content))
+		}
+	}
+}
+
 func TestAddFallsBackWhenLaunchdCannotRepresentSchedule(t *testing.T) {
 	launchdBackend, runner, _ := testLaunchdBackend(t)
 	fallback := &recordingInProcessBackend{}

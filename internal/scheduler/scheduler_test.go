@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	jobstore "github.com/1broseidon/moxie/internal/store"
 )
 
 func testStore(t *testing.T) *Store {
@@ -99,6 +102,30 @@ func TestAddRelativeSchedule(t *testing.T) {
 	}
 
 	want := now.Add(26*time.Hour + 30*time.Minute)
+	if !sc.Spec.At.Equal(want) {
+		t.Fatalf("at = %v, want %v", sc.Spec.At, want)
+	}
+	if !sc.NextRun.Equal(want) {
+		t.Fatalf("next run = %v, want %v", sc.NextRun, want)
+	}
+}
+
+func TestAddRelativeScheduleRoundsUpToNextMinute(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 30, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerAt,
+		Action:  ActionSend,
+		In:      "2m",
+		Text:    "Relative reminder",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+
+	want := time.Date(2026, 3, 17, 21, 3, 0, 0, now.Location())
 	if !sc.Spec.At.Equal(want) {
 		t.Fatalf("at = %v, want %v", sc.Spec.At, want)
 	}
@@ -367,6 +394,9 @@ func TestDueSortsAndSkipsRunningSchedules(t *testing.T) {
 }
 
 func TestDeleteAttachAndMarkDoneValidation(t *testing.T) {
+	restoreStore := jobstore.SetConfigDir(t.TempDir())
+	defer restoreStore()
+
 	store := testStore(t)
 	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
 
@@ -393,6 +423,7 @@ func TestDeleteAttachAndMarkDoneValidation(t *testing.T) {
 	if _, err := store.AttachJob(sc.ID, "job-10"); err != nil {
 		t.Fatalf("AttachJob(): %v", err)
 	}
+	jobstore.WriteJob(jobstore.PendingJob{ID: "job-10", ConversationID: "telegram:1", Status: "running"})
 	if err := store.Delete(sc.ID); err == nil || !strings.Contains(err.Error(), "is running via job job-10") {
 		t.Fatalf("Delete(running) err = %v", err)
 	}
@@ -401,6 +432,35 @@ func TestDeleteAttachAndMarkDoneValidation(t *testing.T) {
 	}
 	if _, err := store.MarkDone(sc.ID, "job-12", now.Add(time.Hour)); err == nil {
 		t.Fatal("expected MarkDone wrong job to fail")
+	}
+}
+
+func TestDeleteAllowsRemovalWhenRunningJobIsStale(t *testing.T) {
+	restoreStore := jobstore.SetConfigDir(t.TempDir())
+	defer restoreStore()
+
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	sc, err := store.Add(AddInput{
+		Trigger: TriggerCron,
+		Action:  ActionDispatch,
+		Cron:    "0 1 * * *",
+		Text:    "Run scan",
+		Now:     now,
+	})
+	if err != nil {
+		t.Fatalf("Add(): %v", err)
+	}
+	if _, err := store.AttachJob(sc.ID, "job-stale"); err != nil {
+		t.Fatalf("AttachJob(): %v", err)
+	}
+
+	if err := store.Delete(sc.ID); err != nil {
+		t.Fatalf("Delete() err = %v, want nil for stale running job", err)
+	}
+	if _, err := store.Get(sc.ID); !os.IsNotExist(err) {
+		t.Fatalf("Get() err = %v, want os.ErrNotExist", err)
 	}
 }
 
@@ -710,5 +770,83 @@ func TestSaveCanonicalizesLegacyScheduleRepresentation(t *testing.T) {
 	wantNextRun := time.Date(2026, 3, 18, 1, 0, 0, 0, now.Location())
 	if !schedules[0].NextRun.Equal(wantNextRun) {
 		t.Fatalf("stored next run = %v, want %v", schedules[0].NextRun, wantNextRun)
+	}
+}
+
+func TestLoadFallsBackToBackupWhenPrimaryIsCorrupt(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	first := Schedule{
+		ID:        "sch-first",
+		Action:    ActionSend,
+		Spec:      ScheduleSpec{Trigger: TriggerAt, At: now.Add(time.Hour)},
+		Text:      "first",
+		CreatedAt: now,
+		NextRun:   now.Add(time.Hour),
+	}
+	second := Schedule{
+		ID:        "sch-second",
+		Action:    ActionSend,
+		Spec:      ScheduleSpec{Trigger: TriggerAt, At: now.Add(2 * time.Hour)},
+		Text:      "second",
+		CreatedAt: now.Add(time.Second),
+		NextRun:   now.Add(2 * time.Hour),
+	}
+	if err := store.save([]Schedule{first, second}); err != nil {
+		t.Fatalf("save schedules: %v", err)
+	}
+	if err := os.WriteFile(store.path, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt primary store: %v", err)
+	}
+
+	schedules, err := store.List()
+	if err != nil {
+		t.Fatalf("List() err = %v, want backup recovery", err)
+	}
+	if len(schedules) != 2 {
+		t.Fatalf("List() len = %d, want 2", len(schedules))
+	}
+	if schedules[0].ID != "sch-first" || schedules[1].ID != "sch-second" {
+		t.Fatalf("List() ids = [%s %s], want [sch-first sch-second]", schedules[0].ID, schedules[1].ID)
+	}
+}
+
+func TestSaveAtomicallyReplacesReadOnlyScheduleFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("atomic replace semantics differ on Windows")
+	}
+
+	store := testStore(t)
+	now := time.Date(2026, 3, 17, 21, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	if err := store.save([]Schedule{{
+		ID:        "sch-original",
+		Action:    ActionSend,
+		Spec:      ScheduleSpec{Trigger: TriggerAt, At: now.Add(time.Hour)},
+		Text:      "original",
+		CreatedAt: now,
+		NextRun:   now.Add(time.Hour),
+	}}); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+	if err := os.Chmod(store.path, 0o400); err != nil {
+		t.Fatalf("chmod primary store: %v", err)
+	}
+
+	if err := store.save([]Schedule{{
+		ID:        "sch-replaced",
+		Action:    ActionSend,
+		Spec:      ScheduleSpec{Trigger: TriggerAt, At: now.Add(2 * time.Hour)},
+		Text:      "replaced",
+		CreatedAt: now,
+		NextRun:   now.Add(2 * time.Hour),
+	}}); err != nil {
+		t.Fatalf("save() err = %v, want atomic replacement to succeed", err)
+	}
+
+	stored := readStoredScheduleRecord(t, store.path)
+	if got := strings.Trim(string(stored["id"]), `"`); got != "sch-replaced" {
+		t.Fatalf("stored id = %q, want %q", got, "sch-replaced")
 	}
 }
