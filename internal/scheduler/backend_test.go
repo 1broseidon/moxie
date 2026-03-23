@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,11 +282,13 @@ func TestAddRelativeOneShotRoundsUpAndSyncsToLaunchd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read plist: %v", err)
 	}
+	// The plist uses time.Local, so expected values depend on the CI timezone.
+	localAt := wantAt.In(time.Local)
 	for _, needle := range []string{
 		"<key>Minute</key>",
-		"<integer>3</integer>",
+		fmt.Sprintf("<integer>%d</integer>", localAt.Minute()),
 		"<key>Hour</key>",
-		"<integer>21</integer>",
+		fmt.Sprintf("<integer>%d</integer>", localAt.Hour()),
 	} {
 		if !strings.Contains(string(content), needle) {
 			t.Fatalf("plist missing %q: %s", needle, string(content))
