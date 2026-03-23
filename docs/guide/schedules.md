@@ -88,7 +88,10 @@ moxie schedule add \
 moxie schedule list           # List all schedules
 moxie schedule show <id>      # Show details for a schedule
 moxie schedule rm <id>        # Delete a schedule
+moxie schedule fire <id>      # Internal/operator trigger path used by native backends
 ```
+
+`moxie schedule fire <id>` is primarily internal plumbing for operator use and future native scheduler backends. Normal schedule creation and execution still happen through `moxie schedule add ...` plus the existing runtime path.
 
 ## Dispatch context
 

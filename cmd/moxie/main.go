@@ -550,6 +550,7 @@ Notes:
   Use exactly one of --in, --at, --every, or --cron
   Use --conversation to target a specific provider conversation, or --transport to target the configured default conversation for one transport
   Dispatch schedules capture backend/model/thread/cwd at creation time
+  schedule fire is primarily internal/operator plumbing used by native scheduler backends
 
 When to use:
   Only when explicitly asked to create, inspect, modify, or delete schedules
@@ -905,13 +906,23 @@ func cmdScheduleFire(scheduleStore *scheduler.Store, args []string) {
 	if len(args) != 1 {
 		fatal("usage: moxie schedule fire <id>")
 	}
-	if _, err := scheduleStore.Get(strings.TrimSpace(args[0])); err != nil {
+	id := strings.TrimSpace(args[0])
+	sc, err := loadScheduleForFire(scheduleStore, id)
+	if err != nil {
 		if os.IsNotExist(err) {
-			fatal("unknown schedule: %s", args[0])
+			fatal("unknown schedule: %s", id)
 		}
 		fatal("schedule fire failed: %v", err)
 	}
-	fatal("schedule fire is reserved for native scheduler backends and is not implemented yet")
+	jobID, alreadyRunning, err := fireScheduleExecution(scheduleStore, sc)
+	if err != nil {
+		fatal("schedule fire failed: %v", err)
+	}
+	if alreadyRunning {
+		fmt.Printf("schedule %s already running via job %s\n", id, jobID)
+		return
+	}
+	fmt.Printf("fired %s via job %s\n", id, jobID)
 }
 
 func cmdScheduleDelete(scheduleStore *scheduler.Store, args []string) {
@@ -1350,11 +1361,150 @@ func scheduleState(sc scheduler.Schedule) store.State {
 	return st
 }
 
+type scheduleJobExecutor func(store.PendingJob) error
+
+var (
+	prepareTelegramScheduleFire = func(cfg store.Config, schedules *scheduler.Store, needsClient bool) (scheduleJobExecutor, error) {
+		bot, err := botpkg.NewBot(cfg)
+		if err != nil {
+			return nil, err
+		}
+		var client *oneagent.Client
+		if needsClient {
+			backends, err := loadServeBackends()
+			if err != nil {
+				return nil, fmt.Errorf("no backends: %w", err)
+			}
+			client = newTelegramClient(backends)
+		}
+		return func(job store.PendingJob) error {
+			botpkg.ProcessJob(job, bot, client, schedules)
+			return nil
+		}, nil
+	}
+	prepareSlackScheduleFire = func(cfg store.Config, schedules *scheduler.Store, needsClient bool) (scheduleJobExecutor, error) {
+		var client *oneagent.Client
+		if needsClient {
+			backends, err := loadServeBackends()
+			if err != nil {
+				return nil, fmt.Errorf("no backends: %w", err)
+			}
+			client = newSlackClient(backends)
+		}
+		adapter, err := slackpkg.New(&cfg, "", client, schedules)
+		if err != nil {
+			return nil, err
+		}
+		return func(job store.PendingJob) error {
+			slackpkg.ProcessJob(job, adapter.API(), client, schedules)
+			return nil
+		}, nil
+	}
+)
+
 func scheduledConversationID(sc scheduler.Schedule, fallbackConversationID string) string {
 	if trimmed := strings.TrimSpace(sc.ConversationID); trimmed != "" {
 		return trimmed
 	}
 	return strings.TrimSpace(fallbackConversationID)
+}
+
+func loadScheduleForFire(scheduleStore *scheduler.Store, id string) (scheduler.Schedule, error) {
+	if err := scheduleStore.Repair(store.JobExists); err != nil {
+		return scheduler.Schedule{}, err
+	}
+	return scheduleStore.Get(strings.TrimSpace(id))
+}
+
+func runningScheduleJobID(sc scheduler.Schedule) (string, bool) {
+	jobID := strings.TrimSpace(sc.RunningJobID)
+	return jobID, jobID != "" && store.JobExists(jobID)
+}
+
+func buildScheduledJob(sc scheduler.Schedule, fallbackConversationID string) (store.PendingJob, error) {
+	conversationID := scheduledConversationID(sc, fallbackConversationID)
+	conversation := chat.ParseConversationID(conversationID)
+	if conversation.Provider == "" || strings.TrimSpace(conversation.ChannelID) == "" {
+		return store.PendingJob{}, fmt.Errorf("schedule %s has no valid conversation", sc.ID)
+	}
+
+	job := store.PendingJob{
+		ID:             store.NewJobID(),
+		ScheduleID:     sc.ID,
+		ConversationID: conversationID,
+		Source:         "schedule",
+		CWD:            sc.CWD,
+		State:          scheduleState(sc),
+	}
+	switch sc.Action {
+	case scheduler.ActionSend:
+		job.Status = "ready"
+		job.Result = sc.Text
+	case scheduler.ActionDispatch:
+		job.Prompt = sc.Text
+	default:
+		return store.PendingJob{}, fmt.Errorf("unknown schedule action %q", sc.Action)
+	}
+	return job, nil
+}
+
+func claimScheduledJob(schedules *scheduler.Store, scheduleID string, job store.PendingJob) (string, bool, error) {
+	store.WriteJob(job)
+	if _, err := schedules.AttachJob(scheduleID, job.ID); err != nil {
+		store.RemoveJob(job.ID)
+		current, getErr := schedules.Get(scheduleID)
+		if getErr == nil {
+			if runningJobID, ok := runningScheduleJobID(current); ok {
+				return runningJobID, true, nil
+			}
+		}
+		return "", false, err
+	}
+	return job.ID, false, nil
+}
+
+func fireScheduleExecution(schedules *scheduler.Store, sc scheduler.Schedule) (string, bool, error) {
+	if runningJobID, ok := runningScheduleJobID(sc); ok {
+		return runningJobID, true, nil
+	}
+
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		return "", false, err
+	}
+	job, err := buildScheduledJob(sc, "")
+	if err != nil {
+		return "", false, err
+	}
+
+	needsClient := sc.Action == scheduler.ActionDispatch
+	conversation := chat.ParseConversationID(job.ConversationID)
+	var execute scheduleJobExecutor
+	switch conversation.Provider {
+	case chat.ProviderTelegram:
+		execute, err = prepareTelegramScheduleFire(cfg, schedules, needsClient)
+	case chat.ProviderSlack:
+		execute, err = prepareSlackScheduleFire(cfg, schedules, needsClient)
+	default:
+		return "", false, fmt.Errorf("unsupported schedule provider: %s", conversation.Provider)
+	}
+	if err != nil {
+		return "", false, err
+	}
+
+	jobID, alreadyRunning, err := claimScheduledJob(schedules, sc.ID, job)
+	if err != nil {
+		return "", false, err
+	}
+	if alreadyRunning {
+		return jobID, true, nil
+	}
+
+	log.Printf("running schedule %s via job %s", sc.ID, job.ID)
+	if err := execute(job); err != nil {
+		return "", false, err
+	}
+	return jobID, false, nil
 }
 
 func runDueSchedulesTelegram(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
@@ -1364,33 +1514,18 @@ func runDueSchedulesTelegram(bot *tb.Bot, client *oneagent.Client, schedules *sc
 		return
 	}
 	for _, sc := range due {
-		conversationID := scheduledConversationID(sc, fallbackConversationID)
-		if chat.ParseConversationID(conversationID).Provider != chat.ProviderTelegram {
+		job, err := buildScheduledJob(sc, fallbackConversationID)
+		if err != nil {
+			log.Printf("schedule job build failed for %s: %v", sc.ID, err)
 			continue
 		}
-		job := botpkg.PendingJob{
-			ID:             store.NewJobID(),
-			ScheduleID:     sc.ID,
-			ConversationID: conversationID,
-			Source:         "schedule",
-			CWD:            sc.CWD,
-			State:          scheduleState(sc),
-		}
-		switch sc.Action {
-		case scheduler.ActionSend:
-			job.Status = "ready"
-			job.Result = sc.Text
-		case scheduler.ActionDispatch:
-			job.Prompt = sc.Text
-		default:
-			log.Printf("unknown schedule action %q for %s", sc.Action, sc.ID)
+		if chat.ParseConversationID(job.ConversationID).Provider != chat.ProviderTelegram {
 			continue
 		}
-
-		store.WriteJob(job)
-		if _, err := schedules.AttachJob(sc.ID, job.ID); err != nil {
+		if _, alreadyRunning, err := claimScheduledJob(schedules, sc.ID, job); err != nil {
 			log.Printf("schedule attach failed for %s: %v", sc.ID, err)
-			store.RemoveJob(job.ID)
+			continue
+		} else if alreadyRunning {
 			continue
 		}
 
@@ -1440,33 +1575,18 @@ func runDueSchedulesSlack(api slackpkg.Messenger, client *oneagent.Client, sched
 		return
 	}
 	for _, sc := range due {
-		conversationID := scheduledConversationID(sc, fallbackConversationID)
-		if chat.ParseConversationID(conversationID).Provider != chat.ProviderSlack {
+		job, err := buildScheduledJob(sc, fallbackConversationID)
+		if err != nil {
+			log.Printf("schedule job build failed for %s: %v", sc.ID, err)
 			continue
 		}
-		job := store.PendingJob{
-			ID:             store.NewJobID(),
-			ScheduleID:     sc.ID,
-			ConversationID: conversationID,
-			Source:         "schedule",
-			CWD:            sc.CWD,
-			State:          scheduleState(sc),
-		}
-		switch sc.Action {
-		case scheduler.ActionSend:
-			job.Status = "ready"
-			job.Result = sc.Text
-		case scheduler.ActionDispatch:
-			job.Prompt = sc.Text
-		default:
-			log.Printf("unknown schedule action %q for %s", sc.Action, sc.ID)
+		if chat.ParseConversationID(job.ConversationID).Provider != chat.ProviderSlack {
 			continue
 		}
-
-		store.WriteJob(job)
-		if _, err := schedules.AttachJob(sc.ID, job.ID); err != nil {
+		if _, alreadyRunning, err := claimScheduledJob(schedules, sc.ID, job); err != nil {
 			log.Printf("schedule attach failed for %s: %v", sc.ID, err)
-			store.RemoveJob(job.ID)
+			continue
+		} else if alreadyRunning {
 			continue
 		}
 
