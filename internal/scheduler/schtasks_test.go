@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -179,5 +180,27 @@ func TestSchTasksTaskXMLUsesScheduleFireEntrypoint(t *testing.T) {
 		if !strings.Contains(xml, needle) {
 			t.Fatalf("xml missing %q: %s", needle, xml)
 		}
+	}
+}
+
+func TestSchTasksRemoveIgnoresMissingTask(t *testing.T) {
+	runner := &recordingCommandRunner{failures: map[string]error{}, prefixFailures: map[string]error{}}
+	backend := &schtasksBackend{runCommand: runner.run}
+	command := "schtasks /delete /tn " + schtasksScheduleName("sch-missing") + " /f"
+	runner.failures[command] = errors.New("ERROR: The system cannot find the file specified.")
+
+	if err := backend.Remove("sch-missing"); err != nil {
+		t.Fatalf("Remove() err = %v, want nil for missing task", err)
+	}
+}
+
+func TestSchTasksRemoveReturnsUnexpectedDeleteFailure(t *testing.T) {
+	runner := &recordingCommandRunner{failures: map[string]error{}, prefixFailures: map[string]error{}}
+	backend := &schtasksBackend{runCommand: runner.run}
+	command := "schtasks /delete /tn " + schtasksScheduleName("sch-protected") + " /f"
+	runner.failures[command] = errors.New("ERROR: Access is denied.")
+
+	if err := backend.Remove("sch-protected"); err == nil || !strings.Contains(err.Error(), "Access is denied") {
+		t.Fatalf("Remove() err = %v, want access denied failure", err)
 	}
 }

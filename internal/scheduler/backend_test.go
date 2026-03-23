@@ -673,6 +673,39 @@ func TestDeleteRemovesThroughManagedBackend(t *testing.T) {
 	}
 }
 
+func TestDeleteSucceedsWhenSchTasksTaskAlreadyMissing(t *testing.T) {
+	schtasksBackend, runner := testSchTasksBackend(t)
+	store := testStoreWithBackends(t, schtasksBackend, &recordingInProcessBackend{})
+	now := time.Date(2026, 3, 18, 10, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+	sc := Schedule{
+		ID:        "sch-missing-native",
+		Action:    ActionDispatch,
+		Spec:      ScheduleSpec{Trigger: TriggerInterval, Interval: "1h0m0s"},
+		Text:      "Run cleanup",
+		CreatedAt: now.Add(-time.Hour),
+		NextRun:   now.Add(time.Hour),
+		Sync: ScheduleSync{
+			ManagedBy: ManagedBySchTasks,
+			State:     SyncStateSynced,
+		},
+	}
+	if err := store.save([]Schedule{sc}); err != nil {
+		t.Fatalf("save schedules: %v", err)
+	}
+	runner.failures["schtasks /delete /tn "+schtasksScheduleName(sc.ID)+" /f"] = errors.New("ERROR: The system cannot find the file specified.")
+
+	if err := store.Delete(sc.ID); err != nil {
+		t.Fatalf("Delete() err = %v, want nil for missing Task Scheduler entry", err)
+	}
+	schedules, err := store.List()
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Fatalf("List() = %v, want schedule removed", schedules)
+	}
+}
+
 func TestMarkDoneOneShotRemovesThroughManagedBackend(t *testing.T) {
 	backend := &recordingInProcessBackend{}
 	store := testStoreWithBackends(t, backend)

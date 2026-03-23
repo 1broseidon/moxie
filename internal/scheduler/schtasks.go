@@ -98,7 +98,11 @@ func (b *schtasksBackend) Update(sc Schedule) error {
 }
 
 func (b *schtasksBackend) Remove(id string) error {
-	if _, err := b.runCommand("schtasks", "/delete", "/tn", schtasksScheduleName(id), "/f"); err != nil {
+	output, err := b.runCommand("schtasks", "/delete", "/tn", schtasksScheduleName(id), "/f")
+	if err != nil {
+		if schtasksMissingTask(output, err) {
+			return nil
+		}
 		return fmt.Errorf("schtasks /delete %s: %w", schtasksScheduleName(id), err)
 	}
 	return nil
@@ -538,6 +542,21 @@ func taskSchedulerMonthName(month int) string {
 	default:
 		panic(fmt.Sprintf("unsupported month %d", month))
 	}
+}
+
+func schtasksMissingTask(output []byte, err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(string(output)))
+	if text == "" {
+		text = strings.ToLower(err.Error())
+	} else {
+		text += "\n" + strings.ToLower(err.Error())
+	}
+	return strings.Contains(text, "the system cannot find the file specified") ||
+		strings.Contains(text, "cannot find the task") ||
+		strings.Contains(text, "path specified") && strings.Contains(text, "cannot find")
 }
 
 func calendarRange(min, max int) []int {
