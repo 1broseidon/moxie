@@ -34,6 +34,7 @@ func TestResolveServeDefaultCWDPrefersCurrentWorkingDir(t *testing.T) {
 	t.Cleanup(func() {
 		_ = os.Chdir(prev)
 	})
+	t.Setenv("PWD", cwd)
 
 	cfg := store.Config{DefaultCWD: filepath.Join(t.TempDir(), "configured")}
 	got, err := resolveServeDefaultCWD(cfg, "")
