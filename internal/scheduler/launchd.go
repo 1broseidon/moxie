@@ -457,14 +457,72 @@ func launchdServiceTarget(uid int, label string) string {
 }
 
 func launchdScheduleEnvironment() map[string]string {
-	env := map[string]string{
-		"PATH": os.Getenv("PATH"),
+	path := os.Getenv("PATH")
+
+	// If the current process has a minimal or empty PATH (e.g. when running
+	// inside a launchd-spawned process that did not inherit the user's login
+	// PATH), try to read the full PATH from the main service plist. This
+	// prevents schedule plists from losing access to user-installed tools
+	// like go, kubectl, cymbal, etc.
+	if isMinimalPATH(path) {
+		if servicePath := readServicePlistPATH(); servicePath != "" {
+			path = servicePath
+		} else {
+			path = launchdScheduleDefaultPATH
+		}
+	}
+
+	return map[string]string{
+		"PATH": path,
 		"HOME": os.Getenv("HOME"),
 	}
-	if strings.TrimSpace(env["PATH"]) == "" {
-		env["PATH"] = launchdScheduleDefaultPATH
+}
+
+// isMinimalPATH returns true when the PATH looks like a bare system default
+// rather than a user's full login PATH.
+func isMinimalPATH(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return true
 	}
-	return env
+	return len(strings.Split(path, ":")) <= 4
+}
+
+// readServicePlistPATH reads the PATH value from the main moxie launchd
+// service plist, if it exists. Returns "" on any failure.
+func readServicePlistPATH() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	plistPath := filepath.Join(home, "Library", "LaunchAgents", "io.github.1broseidon.moxie.plist")
+	data, err := os.ReadFile(plistPath)
+	if err != nil {
+		return ""
+	}
+	return extractPlistStringValue(string(data), "PATH")
+}
+
+// extractPlistStringValue does a simple text scan for a <key>key</key> followed
+// by a <string>value</string> in a plist. It avoids pulling in a full plist
+// parser for this single use case.
+func extractPlistStringValue(plist, key string) string {
+	needle := "<key>" + key + "</key>"
+	idx := strings.Index(plist, needle)
+	if idx < 0 {
+		return ""
+	}
+	rest := plist[idx+len(needle):]
+	start := strings.Index(rest, "<string>")
+	if start < 0 {
+		return ""
+	}
+	rest = rest[start+len("<string>"):]
+	end := strings.Index(rest, "</string>")
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(rest[:end])
 }
 
 func xmlEscape(s string) string {

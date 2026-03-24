@@ -143,6 +143,50 @@ func TestLaunchdSchedulePlistContentsUsesScheduleFireEntrypoint(t *testing.T) {
 	}
 }
 
+func TestIsMinimalPATH(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"", true},
+		{"  ", true},
+		{"/usr/bin:/bin", true},
+		{"/usr/local/bin:/usr/bin:/bin:/sbin", true},
+		{"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/sbin", false},
+		{"/home/user/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", false},
+	}
+	for _, tc := range cases {
+		if got := isMinimalPATH(tc.path); got != tc.want {
+			t.Errorf("isMinimalPATH(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestExtractPlistStringValue(t *testing.T) {
+	plist := `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/tester</string>
+  </dict>
+</dict>
+</plist>`
+
+	if got := extractPlistStringValue(plist, "PATH"); got != "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" {
+		t.Fatalf("PATH = %q", got)
+	}
+	if got := extractPlistStringValue(plist, "HOME"); got != "/Users/tester" {
+		t.Fatalf("HOME = %q", got)
+	}
+	if got := extractPlistStringValue(plist, "MISSING"); got != "" {
+		t.Fatalf("MISSING = %q, want empty", got)
+	}
+}
+
 func TestLaunchdRemoveSucceedsWhenBootoutFails(t *testing.T) {
 	dir := t.TempDir()
 	plistDir := filepath.Join(dir, "Library", "LaunchAgents")

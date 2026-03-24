@@ -547,7 +547,7 @@ func TestRecoverPendingJobsReplaysReadyJobAndAdvancesCursor(t *testing.T) {
 	}
 }
 
-func TestRetryDeliverableJobsProcessesReadyDeliveredAndRunning(t *testing.T) {
+func TestRetryDeliverableJobsProcessesReadyAndRunningButNotDelivered(t *testing.T) {
 	useTempStoreDir(t)
 
 	store.WriteJob(store.PendingJob{ID: "job-201", Status: "ready", ConversationID: "telegram:1", Result: "ready"})
@@ -583,8 +583,14 @@ func TestRetryDeliverableJobsProcessesReadyDeliveredAndRunning(t *testing.T) {
 	if len(resultIDs) != 2 || !found201 || !found203 {
 		t.Fatalf("OnResult IDs = %v, want [job-201, job-203] (any order)", resultIDs)
 	}
-	if store.JobExists("job-201") || store.JobExists("job-202") || store.JobExists("job-203") {
-		t.Fatal("expected all retryable jobs to be removed after successful retry")
+	if store.JobExists("job-201") || store.JobExists("job-203") {
+		t.Fatal("expected retried jobs to be removed after successful retry")
+	}
+	// "delivered" jobs are NOT retried — they are finalized at startup via
+	// RecoverPendingJobs. The retry loop must leave them untouched to avoid
+	// infinite retry loops when finalization is blocked.
+	if !store.JobExists("job-202") {
+		t.Fatal("expected delivered job to be left for startup recovery, not retried")
 	}
 }
 
