@@ -356,7 +356,7 @@ func finalizeSchedule(job *store.PendingJob, schedules *scheduler.Store) {
 func runExecJob(job *store.PendingJob) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", job.Prompt)
+	cmd := exec.CommandContext(ctx, "bash", "-l", "-c", job.Prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
