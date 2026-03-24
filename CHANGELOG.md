@@ -2,6 +2,15 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.3.1] - 2026-03-24
+
+### Added
+
+- Webex file upload — agents can send files back via `<send>` tags using multipart upload
+- Webex file download — inbound attachments are downloaded with Bearer auth and passed to the agent
+- Live activity updates for Webex — status messages are edited in-place via `PUT /messages/{id}`, matching the Telegram experience
+- Verb-aware activity rendering for Webex (Reading files, Running command, Searching)
+
 ## [0.3.0] - 2026-03-24
 
 ### Added
