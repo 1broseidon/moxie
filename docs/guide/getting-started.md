@@ -1,12 +1,12 @@
 # Getting Started
 
-Moxie connects Telegram and Slack to AI coding agents. Messages you send from your phone are dispatched to supported agent backends like Claude, Codex, Gemini, Pi, and OpenCode, and the response is delivered back to your chat.
+Moxie connects Telegram, Slack, and Webex to AI coding agents. Messages you send from your phone or chat client are dispatched to supported agent backends like Claude, Codex, Gemini, Pi, and OpenCode, and the response is delivered back to your chat.
 
 ## Prerequisites
 
 - **Go 1.24+** (for `go install`) or **Homebrew**
 - At least one agent CLI installed (see [Backends](./backends))
-- A Telegram bot token or Slack app credentials
+- A Telegram bot token, Slack app credentials, or a Webex bot token
 
 ## Install
 
@@ -69,20 +69,37 @@ Use foreground `moxie serve` mainly when you want Moxie tied to the current shel
 
 Send a message to your bot in Telegram. Moxie dispatches it to the default backend (Claude) and replies with the result.
 
+## Other transports
+
+### Slack
+
+Slack uses Socket Mode and is configured manually in `~/.config/moxie/config.json`.
+
+See [Slack](./slack).
+
+### Webex
+
+Webex is configured manually in `~/.config/moxie/config.json`.
+
+Current limitation: **Webex support is 1:1 direct-message only**. Group spaces are intentionally ignored for now.
+
+See [Webex](./webex).
+
 ## What's happening
 
 When you send a message:
 
-1. Moxie receives it via the Telegram or Slack transport
+1. Moxie receives it via the Telegram, Slack, or Webex transport
 2. The message is dispatched to the configured agent backend (e.g. `claude -p "your message"`)
 3. The agent works in the current conversation directory, or falls back to the configured default workspace
 4. The response is delivered back to your chat
 
-While the agent is working, you'll see a typing indicator and activity updates (tool calls, file reads, etc.) as status messages.
+While the agent is working, you may see typing indicators or status messages depending on the transport.
 
 ## Next steps
 
 - [Set up Slack](./slack) as an additional or alternative transport
+- [Set up Webex](./webex) for 1:1 direct-message chat
 - [Configure backends](./backends) — switch agents, set default models
 - [Schedule tasks](./schedules) — recurring dispatches, timed reminders
 - [Chat commands](./commands) — `/model`, `/think`, `/cwd`, `/new`

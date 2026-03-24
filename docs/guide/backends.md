@@ -34,7 +34,7 @@ In chat, use `/model` to switch:
 /model pi grok3         → switch to Pi with Grok 3
 ```
 
-The backend and model are persisted per conversation. Telegram and Slack maintain separate state.
+The backend and model are persisted per conversation. Telegram, Slack, and Webex maintain separate state.
 
 ## Thinking levels
 

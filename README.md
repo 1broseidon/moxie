@@ -1,8 +1,8 @@
 # Moxie
 
-Chat agent service that connects Telegram and Slack to AI coding agents. Send a message from your phone, get a response from Claude, Codex, Gemini, Pi, or any other configured backend.
+Chat agent service that connects Telegram, Slack, and Webex to AI coding agents. Send a message from your phone, get a response from Claude, Codex, Gemini, Pi, or any other configured backend.
 
-Moxie runs as an always-on service. Messages are dispatched to the configured agent backend CLI and the result is delivered back to Telegram or Slack.
+Moxie runs as an always-on service. Messages are dispatched to the configured agent backend CLI and the result is delivered back to Telegram, Slack, or Webex.
 
 ## Install
 
@@ -47,11 +47,11 @@ That's it. Use `/model codex` or `/model gemini` in the chat to switch backends.
 
 For most users, the service-first setup is the best default. Use foreground `moxie serve` mainly when you intentionally want Moxie tied to the current project directory in your shell.
 
-For Slack setup or advanced configuration, see below.
+For Slack, Webex, or advanced configuration, see below.
 
 ## Configuration
 
-Moxie reads its config from `~/.config/moxie/config.json`. You can configure one or both transports.
+Moxie reads its config from `~/.config/moxie/config.json`. You can configure one or more transports.
 
 ### Telegram
 
@@ -118,9 +118,35 @@ Slack uses Socket Mode, so no public URL is needed.
 | `app_token` | App-Level Token (`xapp-...`) for Socket Mode |
 | `channel_id` | Optional. Default Slack channel for scheduled messages |
 
-### Both transports
+### Webex
 
-You can run Telegram and Slack simultaneously:
+Webex support is currently **1:1 direct-message only**. Group spaces are intentionally ignored.
+
+Add to your config:
+
+```json
+{
+  "channels": {
+    "webex": {
+      "provider": "webex",
+      "token": "Y2lzY29zcGFyazovL3VzL1RPS0VOL...",
+      "bot_id": "Y2lzY29zcGFyazovL3VzL1BFT1BMRS8..."
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `token` | Webex bot token |
+| `bot_id` | Optional. Bot person ID |
+| `channel_id` | Optional. Default direct room ID for `moxie send --transport webex` and schedules |
+| `allowed_user_ids` | Optional. Allowlist of Webex person IDs permitted to use the bot |
+| `allowed_emails` | Optional. Allowlist of email addresses permitted to use the bot |
+
+### Multiple transports
+
+You can run Telegram, Slack, and Webex simultaneously:
 
 ```json
 {
@@ -134,6 +160,11 @@ You can run Telegram and Slack simultaneously:
       "provider": "slack",
       "token": "xoxb-...",
       "app_token": "xapp-..."
+    },
+    "webex": {
+      "provider": "webex",
+      "token": "Y2lzY29zcGFyazovL3VzL1RPS0VOL...",
+      "bot_id": "Y2lzY29zcGFyazovL3VzL1BFT1BMRS8..."
     }
   }
 }
@@ -319,7 +350,7 @@ Windows still does not have native `moxie service install` / service control sup
 ### serve flags
 
 ```
-moxie serve [--cwd <dir>] [--transport <telegram|slack>]
+moxie serve [--cwd <dir>] [--transport <telegram|slack|webex>]
 ```
 
 | Flag | Description |
@@ -329,7 +360,7 @@ moxie serve [--cwd <dir>] [--transport <telegram|slack>]
 
 ## Chat commands
 
-Commands available in Telegram and Slack:
+Commands available in Telegram, Slack, and Webex direct messages:
 
 | Command | Description |
 |---------|-------------|
@@ -381,7 +412,7 @@ The primary agent can also delegate via the `moxie subagent` CLI tool during a c
 
 ```
 moxie init                                          Configure chat credentials and optionally install/start the service
-moxie send [--transport <telegram|slack>] <message> Send a message
+moxie send [--transport <telegram|slack|webex>] <message> Send a message
 moxie messages [--json|--raw] [-n N]                List recent messages
 moxie msg                                           Alias for messages
 moxie schedule <add|list|show|rm>                   Manage schedules

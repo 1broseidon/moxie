@@ -42,7 +42,7 @@ func parseServiceInstallArgs(args []string) serviceInstallOptions {
 	cwd := fs.String("cwd", "", "")
 	transport := fs.String("transport", "", "")
 	if err := fs.Parse(args); err != nil {
-		fatal("usage: moxie service install [--cwd <dir>] [--transport <telegram|slack>]")
+		fatal("usage: moxie service install [--cwd <dir>] [--transport <telegram|slack|webex>]")
 	}
 	if len(fs.Args()) > 0 {
 		fatal("unexpected service install args: %s", strings.Join(fs.Args(), " "))
@@ -51,7 +51,7 @@ func parseServiceInstallArgs(args []string) serviceInstallOptions {
 		cwd:       strings.TrimSpace(*cwd),
 		transport: strings.TrimSpace(*transport),
 	}
-	if opts.transport != "" && opts.transport != "telegram" && opts.transport != "slack" {
+	if opts.transport != "" && opts.transport != "telegram" && opts.transport != "slack" && opts.transport != "webex" {
 		fatal("unsupported transport for service install: %s", opts.transport)
 	}
 	if opts.cwd != "" {

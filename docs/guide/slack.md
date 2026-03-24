@@ -97,9 +97,9 @@ While the agent is working, Moxie posts a status message showing the current too
 moxie serve --transport slack
 ```
 
-## Both transports
+## Multiple transports
 
-You can run Telegram and Slack simultaneously:
+You can run Telegram, Slack, and Webex simultaneously:
 
 ```json
 {

@@ -204,6 +204,36 @@ func TestSlackValidation(t *testing.T) {
 	}
 }
 
+func TestWebexValidation(t *testing.T) {
+	cfg := Config{
+		Channels: map[string]ChannelConfig{
+			"webex": {},
+		},
+	}
+
+	if _, err := cfg.Webex(); err == nil || err.Error() != "config missing webex token" {
+		t.Fatalf("Webex() missing token err = %v", err)
+	}
+
+	webex, err := (Config{
+		Channels: map[string]ChannelConfig{
+			"webex": {Token: "bot-token", BotID: "bot-id", ChannelID: "room-id", AllowedUserIDs: []string{"user-1"}, AllowedEmails: []string{"user@example.com"}},
+		},
+	}).Webex()
+	if err != nil {
+		t.Fatalf("Webex() valid config: %v", err)
+	}
+	if webex.Provider != "webex" || webex.Token != "bot-token" || webex.BotID != "bot-id" || webex.ChannelID != "room-id" {
+		t.Fatalf("Webex() = %+v, want provider/token/bot_id/channel_id preserved", webex)
+	}
+	if len(webex.AllowedUserIDs) != 1 || webex.AllowedUserIDs[0] != "user-1" {
+		t.Fatalf("Webex() allowed_user_ids = %#v", webex.AllowedUserIDs)
+	}
+	if len(webex.AllowedEmails) != 1 || webex.AllowedEmails[0] != "user@example.com" {
+		t.Fatalf("Webex() allowed_emails = %#v", webex.AllowedEmails)
+	}
+}
+
 func TestReadWriteStateDefaultsAndRoundTrip(t *testing.T) {
 	useTempConfigDir(t)
 

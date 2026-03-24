@@ -9,7 +9,7 @@ Moxie keeps one portable schedule model across platforms. After `moxie schedule 
 Target a schedule in one of two ways:
 
 - `--conversation <provider:channel[:thread]>` to schedule directly into a specific conversation
-- `--transport <telegram|slack>` to use that transport's configured default conversation
+- `--transport <telegram|slack|webex>` to use that transport's configured default conversation
 
 If only one transport is configured, `--transport` can be omitted.
 

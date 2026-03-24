@@ -33,10 +33,13 @@ type Config struct {
 }
 
 type ChannelConfig struct {
-	Provider  string `json:"provider"`
-	Token     string `json:"token,omitempty"`
-	AppToken  string `json:"app_token,omitempty"`
-	ChannelID string `json:"channel_id,omitempty"`
+	Provider       string   `json:"provider"`
+	Token          string   `json:"token,omitempty"`
+	AppToken       string   `json:"app_token,omitempty"`
+	BotID          string   `json:"bot_id,omitempty"`
+	ChannelID      string   `json:"channel_id,omitempty"`
+	AllowedUserIDs []string `json:"allowed_user_ids,omitempty"`
+	AllowedEmails  []string `json:"allowed_emails,omitempty"`
 }
 
 type configFile struct {
@@ -150,6 +153,20 @@ func (cfg Config) Slack() (ChannelConfig, error) {
 	return slack, nil
 }
 
+func (cfg Config) Webex() (ChannelConfig, error) {
+	webex, err := cfg.channel("webex")
+	if err != nil {
+		return ChannelConfig{}, fmt.Errorf("config missing webex channel")
+	}
+	if webex.Provider == "" {
+		webex.Provider = "webex"
+	}
+	if webex.Token == "" {
+		return ChannelConfig{}, fmt.Errorf("config missing webex token")
+	}
+	return webex, nil
+}
+
 func (cfg Config) MaxSubagentDepth() int {
 	if cfg.SubagentMaxDepth > 0 {
 		return cfg.SubagentMaxDepth
@@ -255,6 +272,8 @@ func channelIsValid(name string, ch ChannelConfig) bool {
 		return ch.Token != "" && ch.ChannelID != ""
 	case "slack":
 		return ch.Token != "" && ch.AppToken != ""
+	case "webex":
+		return ch.Token != ""
 	default:
 		return false
 	}

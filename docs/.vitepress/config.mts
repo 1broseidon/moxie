@@ -16,7 +16,7 @@ export default (async () => {
 
   return {
     title: 'moxie',
-    description: 'Chat agent service for Telegram and Slack',
+    description: 'Chat agent service for Telegram, Slack, and Webex',
     base: '/moxie/',
     appearance: false,
     cleanUrls: true,
@@ -46,6 +46,7 @@ export default (async () => {
           items: [
             { text: 'Telegram', link: '/guide/telegram' },
             { text: 'Slack', link: '/guide/slack' },
+            { text: 'Webex', link: '/guide/webex' },
           ],
         },
         {

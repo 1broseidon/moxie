@@ -6,12 +6,14 @@
 
 Interactive setup for Telegram. Prompts for bot token, chat ID, and a default workspace, writes `~/.config/moxie/config.json`, and can optionally install/start the background service. This is the recommended first-run path.
 
+For Slack and Webex, configure `~/.config/moxie/config.json` manually for now.
+
 ### `moxie serve`
 
 Start the chat agent service. Runs all configured transports and dispatches messages to agent backends.
 
 ```bash
-moxie serve [--cwd <dir>] [--transport <telegram|slack>]
+moxie serve [--cwd <dir>] [--transport <telegram|slack|webex>]
 ```
 
 | Flag | Description |
@@ -21,11 +23,13 @@ moxie serve [--cwd <dir>] [--transport <telegram|slack>]
 
 ### `moxie send`
 
-Send a message directly to the configured transport. If both transports are configured, use `--transport telegram` or `--transport slack`.
+Send a message directly to the configured transport. If multiple transports are configured, use `--transport telegram`, `--transport slack`, or `--transport webex`.
 
 ```bash
-moxie send [--transport <telegram|slack>] <message>
+moxie send [--transport <telegram|slack|webex>] <message>
 ```
+
+For Webex, this uses `channels.webex.channel_id`, which must be a **1:1 direct room ID**.
 
 ### `moxie messages`
 
@@ -48,7 +52,7 @@ moxie schedule show <id>        # Show schedule details
 moxie schedule rm <id>          # Delete a schedule
 ```
 
-Use `--conversation <provider:channel[:thread]>` to target a specific conversation directly, or `--transport <telegram|slack>` to use that transport's configured default conversation. If only one transport is configured, `--transport` can be omitted.
+Use `--conversation <provider:channel[:thread]>` to target a specific conversation directly, or `--transport <telegram|slack|webex>` to use that transport's configured default conversation. If only one transport is configured, `--transport` can be omitted.
 
 #### `schedule add` flags
 
@@ -118,7 +122,7 @@ moxie threads show <id>         # Show turns for a thread
 Control the background service.
 
 ```bash
-moxie service install [--cwd <dir>] [--transport <telegram|slack>]
+moxie service install [--cwd <dir>] [--transport <telegram|slack|webex>]
 moxie service uninstall
 moxie service start
 moxie service stop
