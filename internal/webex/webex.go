@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/1broseidon/moxie/internal/chat"
+	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/scheduler"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
@@ -38,13 +43,14 @@ type Room struct {
 }
 
 type Message struct {
-	ID          string `json:"id"`
-	RoomID      string `json:"roomId"`
-	RoomType    string `json:"roomType"`
-	PersonID    string `json:"personId"`
-	PersonEmail string `json:"personEmail"`
-	Text        string `json:"text"`
-	Created     string `json:"created"`
+	ID          string   `json:"id"`
+	RoomID      string   `json:"roomId"`
+	RoomType    string   `json:"roomType"`
+	PersonID    string   `json:"personId"`
+	PersonEmail string   `json:"personEmail"`
+	Text        string   `json:"text"`
+	Files       []string `json:"files,omitempty"`
+	Created     string   `json:"created"`
 }
 
 type createMessageRequest struct {
@@ -169,6 +175,101 @@ func (c *apiClient) SendMessage(ctx context.Context, roomID, text string) (Messa
 
 func (c *apiClient) DeleteMessage(ctx context.Context, messageID string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/messages/"+url.PathEscape(strings.TrimSpace(messageID)), nil, nil)
+}
+
+// SendMessageWithFile sends a message with a local file attachment using multipart/form-data.
+// Webex allows at most one file per message.
+func (c *apiClient) SendMessageWithFile(ctx context.Context, roomID, text, filePath string) (Message, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return Message{}, fmt.Errorf("open file %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("roomId", strings.TrimSpace(roomID))
+	if text != "" {
+		_ = writer.WriteField("markdown", text)
+		_ = writer.WriteField("text", text)
+	}
+	part, err := writer.CreateFormFile("files", filepath.Base(filePath))
+	if err != nil {
+		return Message{}, err
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return Message{}, err
+	}
+	if err := writer.Close(); err != nil {
+		return Message{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/messages", &body)
+	if err != nil {
+		return Message{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return Message{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return Message{}, fmt.Errorf("webex file upload failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	var msg Message
+	err = json.NewDecoder(resp.Body).Decode(&msg)
+	return msg, err
+}
+
+// DownloadFile downloads a file attachment URL (from Message.Files) to a temp file.
+// Webex file URLs require Authorization: Bearer <token> to access.
+func (c *apiClient) DownloadFile(ctx context.Context, fileURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("webex file download failed: %s", resp.Status)
+	}
+
+	ext := ".bin"
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		if exts, err := mime.ExtensionsByType(ct); err == nil && len(exts) > 0 {
+			ext = exts[0]
+		}
+	}
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if name := params["filename"]; name != "" {
+				ext = filepath.Ext(name)
+				if ext == "" {
+					ext = ".bin"
+				}
+			}
+		}
+	}
+
+	tmpFile, err := os.CreateTemp("", "webex-attachment-*"+ext)
+	if err != nil {
+		return "", err
+	}
+	defer tmpFile.Close()
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+	return tmpFile.Name(), nil
 }
 
 type inboundEnvelope struct {
@@ -375,10 +476,23 @@ func (a *Adapter) handleMessage(msg Message) {
 		return
 	}
 	text := strings.TrimSpace(msg.Text)
-	if text == "" {
+	if text == "" && len(msg.Files) == 0 {
 		return
 	}
 	log.Printf("webex inbound DM from %s (%s): %s", strings.TrimSpace(msg.PersonEmail), strings.TrimSpace(msg.PersonID), previewText(text))
+
+	var tempPath string
+	promptText := text
+	if len(msg.Files) > 0 {
+		path, err := a.api.DownloadFile(context.Background(), msg.Files[0])
+		if err != nil {
+			log.Printf("webex file download failed: %v", err)
+		} else {
+			tempPath = path
+			promptText = prompt.FormatMediaPrompt("a file", path, text, "User sent a file")
+		}
+	}
+
 	a.processInbound(inboundEnvelope{
 		inbound: chat.InboundMessage{
 			EventID:      msg.ID,
@@ -386,7 +500,8 @@ func (a *Adapter) handleMessage(msg Message) {
 			Conversation: webexConversation(msg.RoomID),
 			SenderName:   senderName(msg.PersonEmail),
 			Text:         text,
-			Prompt:       text,
+			Prompt:       promptText,
+			TempPath:     tempPath,
 		},
 		reply: webexConversation(msg.RoomID),
 	})

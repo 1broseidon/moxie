@@ -27,12 +27,22 @@ func (f *fakeMessenger) DeleteMessage(_ context.Context, messageID string) error
 	return nil
 }
 
+func (f *fakeMessenger) SendMessageWithFile(_ context.Context, roomID, text, filePath string) (Message, error) {
+	f.sentRooms = append(f.sentRooms, roomID)
+	f.sentTexts = append(f.sentTexts, "file:"+filePath)
+	return Message{ID: "msg-file", RoomID: roomID}, nil
+}
+
 func (f *fakeMessenger) GetRoom(_ context.Context, roomID string) (Room, error) {
 	room := f.room
 	if room.ID == "" {
 		room.ID = roomID
 	}
 	return room, nil
+}
+
+func (f *fakeMessenger) DownloadFile(_ context.Context, fileURL string) (string, error) {
+	return "/tmp/fake-download.bin", nil
 }
 
 func useWebexStoreDir(t *testing.T) {
@@ -88,17 +98,21 @@ func TestDeliverJobResultUsesStoredReplyConversationAndStripsSendTags(t *testing
 	if err := DeliverJobResult(api, job); err != nil {
 		t.Fatalf("DeliverJobResult(): %v", err)
 	}
-	if len(api.sentRooms) != 1 || api.sentRooms[0] != "room-reply" {
-		t.Fatalf("sentRooms = %#v, want reply room", api.sentRooms)
+	if len(api.sentRooms) < 1 || api.sentRooms[0] != "room-reply" {
+		t.Fatalf("sentRooms = %#v, want reply room first", api.sentRooms)
 	}
-	if len(api.sentTexts) != 1 {
-		t.Fatalf("sentTexts len = %d, want 1", len(api.sentTexts))
+	// First message is text, second is file upload
+	if len(api.sentTexts) < 2 {
+		t.Fatalf("sentTexts len = %d, want at least 2 (text + file)", len(api.sentTexts))
 	}
 	if strings.Contains(api.sentTexts[0], "<send>") {
 		t.Fatalf("send tag leaked: %q", api.sentTexts[0])
 	}
-	if !strings.Contains(api.sentTexts[0], "File delivery is not supported on Webex yet: report.txt") {
-		t.Fatalf("text = %q, missing file notice", api.sentTexts[0])
+	if !strings.Contains(api.sentTexts[0], "done") {
+		t.Fatalf("text = %q, want 'done'", api.sentTexts[0])
+	}
+	if !strings.Contains(api.sentTexts[1], "file:/tmp/report.txt") {
+		t.Fatalf("file send = %q, want file:/tmp/report.txt", api.sentTexts[1])
 	}
 }
 

@@ -21,8 +21,10 @@ var sendTagPattern = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
 
 type messenger interface {
 	SendMessage(ctx context.Context, roomID, text string) (Message, error)
+	SendMessageWithFile(ctx context.Context, roomID, text, filePath string) (Message, error)
 	DeleteMessage(ctx context.Context, messageID string) error
 	GetRoom(ctx context.Context, roomID string) (Room, error)
+	DownloadFile(ctx context.Context, fileURL string) (string, error)
 }
 
 type Messenger = messenger
@@ -90,7 +92,29 @@ func renderActivityText(activity string) string {
 	if activity == "" {
 		return "Working..."
 	}
-	return "Working...\n" + activity
+
+	words := strings.Fields(activity)
+	verb := strings.ToLower(words[0])
+	summary := "Working..."
+	switch verb {
+	case "read":
+		summary = "Reading files..."
+	case "write":
+		summary = "Writing files..."
+	case "edit", "patch":
+		summary = "Editing files..."
+	case "bash", "sh", "zsh":
+		summary = "Running command..."
+	case "rg", "grep", "find", "ls", "glob":
+		summary = "Searching..."
+	}
+
+	detail := activity
+	runes := []rune(detail)
+	if len(runes) > 140 {
+		detail = string(runes[:140]) + "…"
+	}
+	return summary + "\n" + detail
 }
 
 // show sends a one-time "Working..." status message. Unlike Slack, Webex does
@@ -174,15 +198,19 @@ func splitResponseFiles(text string) ([]string, string) {
 	return paths, cleaned
 }
 
-func fileUploadNotice(paths []string) string {
-	if len(paths) == 0 {
-		return ""
-	}
-	names := make([]string, 0, len(paths))
+func sendTaggedFiles(api messenger, conversation chat.ConversationRef, paths []string) []string {
+	var failed []string
 	for _, path := range paths {
-		names = append(names, filepath.Base(path))
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if _, err := api.SendMessageWithFile(context.Background(), conversation.ChannelID, "", path); err != nil {
+			log.Printf("webex file send error for %s: %v", filepath.Base(path), err)
+			failed = append(failed, filepath.Base(path))
+		}
 	}
-	return fmt.Sprintf("File delivery is not supported on Webex yet: %s", strings.Join(names, ", "))
+	return failed
 }
 
 func emptyResultMessage(backend string) string {
@@ -195,14 +223,6 @@ func emptyResultMessage(backend string) string {
 
 func DeliverJobResult(api messenger, job *store.PendingJob) error {
 	paths, text := splitResponseFiles(job.Result)
-	notice := fileUploadNotice(paths)
-	if notice != "" {
-		if text != "" {
-			text += "\n\n" + notice
-		} else {
-			text = notice
-		}
-	}
 	if text == "" && len(paths) == 0 {
 		text = emptyResultMessage(job.State.Backend)
 	}
@@ -210,7 +230,15 @@ func DeliverJobResult(api messenger, job *store.PendingJob) error {
 	if target.Provider != chat.ProviderWebex || target.ChannelID == "" {
 		return fmt.Errorf("unsupported webex conversation: %+v", target)
 	}
-	return SendPlainText(api, target, text)
+	if err := SendPlainText(api, target, text); err != nil {
+		return err
+	}
+	if len(paths) > 0 {
+		if failed := sendTaggedFiles(api, target, paths); len(failed) > 0 {
+			log.Printf("webex file delivery failed for: %s", strings.Join(failed, ", "))
+		}
+	}
+	return nil
 }
 
 func SendImmediate(api messenger, conversation chat.ConversationRef, text string) (string, bool) {
