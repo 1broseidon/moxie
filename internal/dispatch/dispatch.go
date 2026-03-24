@@ -1,10 +1,12 @@
 package dispatch
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -262,6 +264,11 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 		}
 	}()
 
+	if job.Source == "exec" {
+		processExecJob(job, schedules, callbacks)
+		return
+	}
+
 	if job.Status != "ready" && job.Status != "delivered" {
 		job.Status = "running"
 		store.WriteJob(*job)
@@ -288,6 +295,34 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	if callbacks.OnStatusClear != nil {
 		callbacks.OnStatusClear()
 	}
+	deliverAndFinalize(job, schedules, callbacks)
+}
+
+func processExecJob(job *store.PendingJob, schedules *scheduler.Store, callbacks Callbacks) {
+	if job.Status != "ready" && job.Status != "delivered" {
+		job.Status = "running"
+		store.WriteJob(*job)
+		result, err := runExecJob(job)
+		if err != nil {
+			log.Printf("exec job %s failed: %v", job.ID, err)
+			finalizeSchedule(job, schedules)
+			store.RemoveJob(job.ID)
+			return
+		}
+		if strings.TrimSpace(result) == "" {
+			log.Printf("exec job %s produced no output — skipping delivery", job.ID)
+			finalizeSchedule(job, schedules)
+			store.RemoveJob(job.ID)
+			return
+		}
+		job.Result = result
+		job.Status = "ready"
+		store.WriteJob(*job)
+	}
+	deliverAndFinalize(job, schedules, callbacks)
+}
+
+func deliverAndFinalize(job *store.PendingJob, schedules *scheduler.Store, callbacks Callbacks) {
 	if job.Status != "delivered" {
 		if callbacks.OnResult != nil {
 			if err := callbacks.OnResult(job.Result); err != nil {
@@ -299,19 +334,36 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 		job.Status = "delivered"
 		store.WriteJob(*job)
 	}
-	if job.ScheduleID != "" && schedules != nil {
-		if _, err := schedules.MarkDone(job.ScheduleID, job.ID, time.Now()); err != nil {
-			if os.IsNotExist(err) {
-				log.Printf("dropping orphaned schedule job %s for missing schedule %s", job.ID, job.ScheduleID)
-			} else {
-				log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
-				return
-			}
-		}
-	}
+	finalizeSchedule(job, schedules)
 	writeArtifact(job)
 	store.CleanupJobTemp(*job)
 	store.RemoveJob(job.ID)
+}
+
+func finalizeSchedule(job *store.PendingJob, schedules *scheduler.Store) {
+	if job.ScheduleID == "" || schedules == nil {
+		return
+	}
+	if _, err := schedules.MarkDone(job.ScheduleID, job.ID, time.Now()); err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("dropping orphaned schedule job %s for missing schedule %s", job.ID, job.ScheduleID)
+		} else {
+			log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
+		}
+	}
+}
+
+func runExecJob(job *store.PendingJob) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", job.Prompt)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("%v: %s", err, stderr.String())
+	}
+	return stdout.String(), nil
 }
 
 func writeArtifact(job *store.PendingJob) {

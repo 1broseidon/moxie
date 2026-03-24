@@ -537,7 +537,7 @@ Internal/operator:
 Flags for add:
   --transport <telegram|slack>                Use the configured default conversation for one transport
   --conversation <provider:channel[:thread]>  Target a specific provider conversation directly
-  --action <send|dispatch>                    Send a fixed message or dispatch agent work
+  --action <send|dispatch|exec>                Send a fixed message, dispatch agent work, or run a command
   --text <text>                               Message text or dispatch task
   --in <duration>                             Relative one-shot schedule like 5m, 2h, or 1d2h30m
   --at <time>                                 Exact one-shot timestamp (RFC3339, YYYY-MM-DDTHH:MM, or YYYY-MM-DD HH:MM)
@@ -558,13 +558,14 @@ Notes:
 When to use:
   Only when explicitly asked to create, inspect, modify, or delete schedules
   Prefer --in for one-shot relative times, --at for exact timestamps, --every for recurring interval schedules, and --cron for recurring calendar schedules
-  Use action send for fixed messages and action dispatch for agent work
+  Use action send for fixed messages, dispatch for agent work, or exec to run a command and send its output
 
 Examples:
   moxie schedule add --transport telegram --action send --in 5m --text "Call John"
   moxie schedule add --transport telegram --action dispatch --every 30m --text "Check queue depth"
   moxie schedule add --conversation slack:C123:1710000000.100 --action send --at 2026-03-18T10:00:00-05:00 --text "Call John"
   moxie schedule add --transport slack --action dispatch --cron "0 1 * * *" --text "Run a security scan"
+  moxie schedule add --transport telegram --action exec --cron "7 * * * *" --text "/path/to/check-email.sh"
   moxie schedule list
   moxie schedule show sch-123
   moxie schedule rm sch-123`)
@@ -785,7 +786,7 @@ func applyScheduleAddOverrides(input *scheduler.AddInput, backend, model, thread
 }
 
 func applyScheduleActionDefaults(input *scheduler.AddInput) {
-	if input.Action != scheduler.ActionSend {
+	if input.Action != scheduler.ActionSend && input.Action != scheduler.ActionExec {
 		return
 	}
 	input.Backend = ""
@@ -847,7 +848,7 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	conversationFlag := fs.String("conversation", "", "")
 
 	if err := fs.Parse(args); err != nil {
-		fatal("usage: moxie schedule add (--transport <telegram|slack>|--conversation <provider:channel[:thread]>) --action <send|dispatch> (--in <duration>|--at <time>|--every <duration>|--cron <spec>) --text <text>")
+		fatal("usage: moxie schedule add (--transport <telegram|slack>|--conversation <provider:channel[:thread]>) --action <send|dispatch|exec> (--in <duration>|--at <time>|--every <duration>|--cron <spec>) --text <text>")
 	}
 	if fs.NArg() > 0 {
 		fatal("unexpected schedule add args: %s", strings.Join(fs.Args(), " "))
@@ -1622,6 +1623,9 @@ func buildScheduledJob(sc scheduler.Schedule, fallbackConversationID string) (st
 		job.Result = sc.Text
 	case scheduler.ActionDispatch:
 		job.Prompt = sc.Text
+	case scheduler.ActionExec:
+		job.Prompt = sc.Text
+		job.Source = "exec"
 	default:
 		return store.PendingJob{}, fmt.Errorf("unknown schedule action %q", sc.Action)
 	}

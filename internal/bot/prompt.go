@@ -2,11 +2,27 @@ package bot
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/1broseidon/oneagent"
 )
+
+func detectShell() string {
+	if s := os.Getenv("SHELL"); s != "" {
+		return filepath.Base(s)
+	}
+	if runtime.GOOS == "windows" {
+		if os.Getenv("PSModulePath") != "" {
+			return "powershell"
+		}
+		return "cmd"
+	}
+	return ""
+}
 
 const TelegramSystemPrompt = `You are responding via a Telegram bot. Format all replies using Telegram HTML.
 Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <a href="url">link</a>.
@@ -20,7 +36,8 @@ Use the local moxie CLI as the source of truth for what Moxie can do.
 Treat moxie schedule, moxie subagent, and moxie result as first-class Moxie capabilities.
 Describe capabilities from the user's point of view: what Moxie can do for them, not which underlying harness happens to execute the work.
 Prefer observed local behavior over assumptions when describing capabilities.
-When delegating work to other agents or backends, always use moxie subagent. Do not use internal agent tools or skills for delegation.`
+When delegating work to other agents or backends, always use moxie subagent. Do not use internal agent tools or skills for delegation.
+For recurring automated tasks (monitoring, checks, notifications), use moxie schedule add --action exec with a script that prints output only when there is something to report. Moxie delivers stdout to the user and stays silent when the script produces no output. Write scripts to ~/.config/moxie/scripts/ and make them executable.`
 
 func InjectSystemPrompt(backends map[string]string) map[string]string {
 	injected := make(map[string]string, len(backends))
@@ -55,7 +72,11 @@ func ApplySystemPrompt(backends map[string]oneagent.Backend) {
 				others = append(others, n)
 			}
 		}
-		identity := fmt.Sprintf("\nYou are running on the %s backend.", name)
+		identity := fmt.Sprintf("\nYou are running on the %s backend. Platform: %s/%s", name, runtime.GOOS, runtime.GOARCH)
+		if shell := detectShell(); shell != "" {
+			identity += fmt.Sprintf(", shell: %s", shell)
+		}
+		identity += "."
 		if len(others) > 0 {
 			identity += fmt.Sprintf(" Available backends for moxie subagent: %s.", strings.Join(others, ", "))
 		}

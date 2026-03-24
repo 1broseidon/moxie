@@ -34,6 +34,7 @@ type Action string
 const (
 	ActionSend     Action = "send"
 	ActionDispatch Action = "dispatch"
+	ActionExec     Action = "exec"
 )
 
 type CalendarSpec struct {
@@ -537,8 +538,8 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 	}
 
 	action := input.Action
-	if action != ActionSend && action != ActionDispatch {
-		return Schedule{}, fmt.Errorf("action must be send or dispatch")
+	if action != ActionSend && action != ActionDispatch && action != ActionExec {
+		return Schedule{}, fmt.Errorf("action must be send, dispatch, or exec")
 	}
 
 	trigger := canonicalTrigger(input.Trigger)
