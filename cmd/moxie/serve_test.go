@@ -27,6 +27,11 @@ func TestChooseServeTransportsReturnsAllConfigured(t *testing.T) {
 				AppToken:  "xapp-token",
 				ChannelID: "C123",
 			},
+			"webex": {
+				Provider:  "webex",
+				Token:     "webex-token",
+				ChannelID: "room-123",
+			},
 		},
 	}
 
@@ -34,8 +39,28 @@ func TestChooseServeTransportsReturnsAllConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chooseServeTransports() err = %v", err)
 	}
-	if len(got) != 2 || got[0] != "telegram" || got[1] != "slack" {
-		t.Fatalf("chooseServeTransports() = %v, want [telegram slack]", got)
+	if len(got) != 3 || got[0] != "telegram" || got[1] != "slack" || got[2] != "webex" {
+		t.Fatalf("chooseServeTransports() = %v, want [telegram slack webex]", got)
+	}
+}
+
+func TestChooseServeTransportReturnsWebexWhenOnlyWebexIsConfigured(t *testing.T) {
+	cfg := store.Config{
+		Channels: map[string]store.ChannelConfig{
+			"webex": {
+				Provider:  "webex",
+				Token:     "webex-token",
+				ChannelID: "room-123",
+			},
+		},
+	}
+
+	got, err := chooseServeTransport(cfg, "")
+	if err != nil {
+		t.Fatalf("chooseServeTransport() err = %v", err)
+	}
+	if got != "webex" {
+		t.Fatalf("chooseServeTransport() = %q, want webex", got)
 	}
 }
 

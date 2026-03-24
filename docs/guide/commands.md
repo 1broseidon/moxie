@@ -1,6 +1,6 @@
 # Chat Commands
 
-Commands available in Telegram and Slack conversations. All commands start with `/`.
+Commands available in Telegram, Slack, and Webex direct-message conversations. All commands start with `/`.
 
 ## Reference
 

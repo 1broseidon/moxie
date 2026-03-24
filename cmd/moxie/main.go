@@ -25,6 +25,7 @@ import (
 	"github.com/1broseidon/moxie/internal/scheduler"
 	slackpkg "github.com/1broseidon/moxie/internal/slack"
 	"github.com/1broseidon/moxie/internal/store"
+	webexpkg "github.com/1broseidon/moxie/internal/webex"
 	"github.com/1broseidon/oneagent"
 	tb "gopkg.in/telebot.v4"
 )
@@ -83,7 +84,7 @@ Usage:
   moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
   moxie service <subcommand>              Control the background service
-  moxie serve [--cwd <dir>] [--transport <telegram|slack>]  Run configured chat transports and dispatch to agent backends`)
+  moxie serve [--cwd <dir>] [--transport <telegram|slack|webex>]  Run configured chat transports and dispatch to agent backends`)
 }
 
 const defaultServiceUnit = "moxie-serve.service"
@@ -95,7 +96,7 @@ func serviceUsage() {
 	fmt.Println(`moxie service — control the background service
 
 Usage:
-  moxie service install [--cwd <dir>] [--transport <telegram|slack>]
+  moxie service install [--cwd <dir>] [--transport <telegram|slack|webex>]
   moxie service uninstall
   moxie service start
   moxie service stop
@@ -159,7 +160,7 @@ func runSystemdUserAction(action string) {
 	cmd.Stdin = os.Stdin
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
-		os.Stdout.Write(out)
+		_, _ = os.Stdout.Write(out)
 	}
 	if err != nil {
 		output := strings.TrimSpace(string(out))
@@ -392,6 +393,21 @@ func cmdSend() {
 			return
 		}
 		fmt.Printf("queued for retry (job %s)\n", jobID)
+	case "webex":
+		conversation := webexDefaultConversation(cfg)
+		if conversation.ChannelID == "" {
+			fatal("webex send requires channels.webex.channel_id (a 1:1 direct room ID)")
+		}
+		adapter, err := webexpkg.New(&cfg, "", nil, nil)
+		if err != nil {
+			fatal("webex init failed: %v", err)
+		}
+		jobID, delivered := webexpkg.SendImmediate(adapter.API(), conversation, msg)
+		if delivered {
+			fmt.Println("sent")
+			return
+		}
+		fmt.Printf("queued for retry (job %s)\n", jobID)
 	default:
 		fatal("unsupported transport: %s", transport)
 	}
@@ -542,7 +558,7 @@ Internal/operator:
   moxie schedule fire <id>
 
 Flags for add:
-  --transport <telegram|slack>                Use the configured default conversation for one transport
+  --transport <telegram|slack|webex>          Use the configured default conversation for one transport
   --conversation <provider:channel[:thread]>  Target a specific provider conversation directly
   --action <send|dispatch|exec>                Send a fixed message, dispatch agent work, or run a command
   --text <text>                               Message text or dispatch task
@@ -815,6 +831,12 @@ func defaultConversationForTransport(cfg store.Config, transport string) (chat.C
 			return chat.ConversationRef{}, fmt.Errorf("slack schedule target requires channels.slack.channel_id")
 		}
 		return conversation, nil
+	case "webex":
+		conversation := webexDefaultConversation(cfg)
+		if conversation.ChannelID == "" {
+			return chat.ConversationRef{}, fmt.Errorf("webex schedule target requires channels.webex.channel_id (a 1:1 direct room ID)")
+		}
+		return conversation, nil
 	default:
 		return chat.ConversationRef{}, fmt.Errorf("unsupported transport: %s", transport)
 	}
@@ -855,7 +877,7 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	conversationFlag := fs.String("conversation", "", "")
 
 	if err := fs.Parse(args); err != nil {
-		fatal("usage: moxie schedule add (--transport <telegram|slack>|--conversation <provider:channel[:thread]>) --action <send|dispatch|exec> (--in <duration>|--at <time>|--every <duration>|--cron <spec>) --text <text>")
+		fatal("usage: moxie schedule add (--transport <telegram|slack|webex>|--conversation <provider:channel[:thread]>) --action <send|dispatch|exec> (--in <duration>|--at <time>|--every <duration>|--cron <spec>) --text <text>")
 	}
 	if fs.NArg() > 0 {
 		fatal("unexpected schedule add args: %s", strings.Join(fs.Args(), " "))
@@ -1588,6 +1610,24 @@ var (
 			return nil
 		}, nil
 	}
+	prepareWebexScheduleFire = func(cfg store.Config, schedules *scheduler.Store, needsClient bool) (scheduleJobExecutor, error) {
+		var client *oneagent.Client
+		if needsClient {
+			backends, err := loadServeBackends()
+			if err != nil {
+				return nil, fmt.Errorf("no backends: %w", err)
+			}
+			client = newWebexClient(backends)
+		}
+		adapter, err := webexpkg.New(&cfg, "", client, schedules)
+		if err != nil {
+			return nil, err
+		}
+		return func(job store.PendingJob) error {
+			webexpkg.ProcessJob(job, adapter.API(), client, schedules)
+			return nil
+		}, nil
+	}
 )
 
 func scheduledConversationID(sc scheduler.Schedule, fallbackConversationID string) string {
@@ -1676,6 +1716,8 @@ func fireScheduleExecution(schedules *scheduler.Store, sc scheduler.Schedule) (s
 		execute, err = prepareTelegramScheduleFire(cfg, schedules, needsClient)
 	case chat.ProviderSlack:
 		execute, err = prepareSlackScheduleFire(cfg, schedules, needsClient)
+	case chat.ProviderWebex:
+		execute, err = prepareWebexScheduleFire(cfg, schedules, needsClient)
 	default:
 		return "", false, fmt.Errorf("unsupported schedule provider: %s", conversation.Provider)
 	}
@@ -1801,6 +1843,48 @@ func startDeliveryRetryLoopSlack(ctx context.Context, api slackpkg.Messenger, cl
 	})
 }
 
+func runDueSchedulesWebex(api webexpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
+	due, err := schedules.Due(time.Now())
+	if err != nil {
+		log.Printf("schedule due check failed: %v", err)
+		return
+	}
+	for _, sc := range due {
+		job, err := buildScheduledJob(sc, fallbackConversationID)
+		if err != nil {
+			log.Printf("schedule job build failed for %s: %v", sc.ID, err)
+			continue
+		}
+		if chat.ParseConversationID(job.ConversationID).Provider != chat.ProviderWebex {
+			continue
+		}
+		if _, alreadyRunning, err := claimScheduledJob(schedules, sc.ID, job); err != nil {
+			log.Printf("schedule attach failed for %s: %v", sc.ID, err)
+			continue
+		} else if alreadyRunning {
+			continue
+		}
+
+		log.Printf("running schedule %s via job %s", sc.ID, job.ID)
+		webexpkg.ProcessJob(job, api, client, schedules)
+		if dispatch.IsShuttingDown() {
+			return
+		}
+	}
+}
+
+func startScheduleLoopWebex(ctx context.Context, api webexpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, conversationID string) {
+	startTickerLoop(ctx, 30*time.Second, func() {
+		runDueSchedulesWebex(api, client, schedules, conversationID)
+	})
+}
+
+func startDeliveryRetryLoopWebex(ctx context.Context, api webexpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store) {
+	startTickerLoop(ctx, 15*time.Second, func() {
+		webexpkg.RetryDeliverableJobs(api, client, schedules)
+	})
+}
+
 // --- Subagent job watcher ---
 
 // stripSubagentLines removes lines mentioning "moxie subagent" from text.
@@ -1820,6 +1904,8 @@ type subagentTransports struct {
 	telegramClient *oneagent.Client
 	slackAPI       slackpkg.Messenger
 	slackClient    *oneagent.Client
+	webexAPI       webexpkg.Messenger
+	webexClient    *oneagent.Client
 	schedules      *scheduler.Store
 	maxDepth       int
 
@@ -1846,6 +1932,12 @@ func startSubagentWatcher(ctx context.Context, cfg store.Config, backends map[st
 		if adapter, err := slackpkg.New(&cfg, "", nil, nil); err == nil {
 			st.slackAPI = adapter.API()
 			st.slackClient = newSlackClient(backends)
+		}
+	}
+	if _, err := cfg.Webex(); err == nil {
+		if adapter, err := webexpkg.New(&cfg, "", nil, nil); err == nil {
+			st.webexAPI = adapter.API()
+			st.webexClient = newWebexClient(backends)
 		}
 	}
 
@@ -1905,6 +1997,18 @@ func runSubagentJobs(st *subagentTransports) {
 			client = st.slackClient
 			deliver = func(synthJob store.PendingJob) error {
 				return slackpkg.DeliverJobResult(st.slackAPI, &synthJob)
+			}
+		case chat.ProviderWebex:
+			if st.webexAPI == nil || st.webexClient == nil {
+				log.Printf("subagent job %s targets webex but no webex transport", job.ID)
+				st.mu.Lock()
+				delete(st.inFlight, job.ID)
+				st.mu.Unlock()
+				continue
+			}
+			client = st.webexClient
+			deliver = func(synthJob store.PendingJob) error {
+				return webexpkg.DeliverJobResult(st.webexAPI, &synthJob)
 			}
 		default:
 			log.Printf("subagent job %s has unknown provider %s", job.ID, provider)
@@ -2020,6 +2124,11 @@ func chooseServeTransport(cfg store.Config, requested string) (string, error) {
 				return "", err
 			}
 			return requested, nil
+		case "webex":
+			if _, err := cfg.Webex(); err != nil {
+				return "", err
+			}
+			return requested, nil
 		default:
 			return "", fmt.Errorf("unknown transport: %s", requested)
 		}
@@ -2033,16 +2142,33 @@ func chooseServeTransport(cfg store.Config, requested string) (string, error) {
 	if _, err := cfg.Slack(); err == nil {
 		hasSlack = true
 	}
+	hasWebex := false
+	if _, err := cfg.Webex(); err == nil {
+		hasWebex = true
+	}
 
-	switch {
-	case hasTelegram && !hasSlack:
-		return "telegram", nil
-	case hasSlack && !hasTelegram:
-		return "slack", nil
-	case hasSlack && hasTelegram:
-		return "", fmt.Errorf("multiple transports configured; use --transport telegram or --transport slack")
-	default:
+	count := 0
+	selected := ""
+	if hasTelegram {
+		count++
+		selected = "telegram"
+	}
+	if hasSlack {
+		count++
+		selected = "slack"
+	}
+	if hasWebex {
+		count++
+		selected = "webex"
+	}
+
+	switch count {
+	case 0:
 		return "", fmt.Errorf("no valid transport configured")
+	case 1:
+		return selected, nil
+	default:
+		return "", fmt.Errorf("multiple transports configured; use --transport telegram, --transport slack, or --transport webex")
 	}
 }
 
@@ -2056,12 +2182,15 @@ func chooseServeTransports(cfg store.Config, requested string) ([]string, error)
 		return []string{transport}, nil
 	}
 
-	transports := make([]string, 0, 2)
+	transports := make([]string, 0, 3)
 	if _, err := cfg.Telegram(); err == nil {
 		transports = append(transports, "telegram")
 	}
 	if _, err := cfg.Slack(); err == nil {
 		transports = append(transports, "slack")
+	}
+	if _, err := cfg.Webex(); err == nil {
+		transports = append(transports, "webex")
 	}
 	if len(transports) == 0 {
 		return nil, fmt.Errorf("no valid transport configured")
@@ -2086,6 +2215,12 @@ func newTelegramClient(backends map[string]oneagent.Backend) *oneagent.Client {
 func newSlackClient(backends map[string]oneagent.Backend) *oneagent.Client {
 	cloned := cloneBackends(backends)
 	slackpkg.ApplySystemPrompt(cloned)
+	return &oneagent.Client{Backends: cloned}
+}
+
+func newWebexClient(backends map[string]oneagent.Backend) *oneagent.Client {
+	cloned := cloneBackends(backends)
+	webexpkg.ApplySystemPrompt(cloned)
 	return &oneagent.Client{Backends: cloned}
 }
 
@@ -2213,6 +2348,14 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 				name: "slack",
 				run: func(ctx context.Context) error {
 					return runSlackTransport(ctx, cfg, defaultCWD, client, schedules)
+				},
+			})
+		case "webex":
+			client := newWebexClient(backends)
+			runtimes = append(runtimes, serveTransportRuntime{
+				name: "webex",
+				run: func(ctx context.Context) error {
+					return runWebexTransport(ctx, cfg, defaultCWD, client, schedules)
 				},
 			})
 		default:
@@ -2348,6 +2491,39 @@ func runSlackTransport(ctx context.Context, cfg store.Config, defaultCWD string,
 
 	if err := adapter.Run(ctx); err != nil && ctx.Err() == nil && !dispatch.IsShuttingDown() {
 		return fmt.Errorf("slack serve failed: %w", err)
+	}
+	return nil
+}
+
+func webexDefaultConversation(cfg store.Config) chat.ConversationRef {
+	ch, err := cfg.Webex()
+	if err != nil {
+		return chat.ConversationRef{Provider: chat.ProviderWebex}
+	}
+	return chat.ConversationRef{
+		Provider:  chat.ProviderWebex,
+		ChannelID: ch.ChannelID,
+	}
+}
+
+func runWebexTransport(ctx context.Context, cfg store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store) error {
+	adapter, err := webexpkg.New(&cfg, defaultCWD, client, schedules)
+	if err != nil {
+		return fmt.Errorf("webex init failed: %w", err)
+	}
+
+	webexpkg.RecoverPendingJobs(adapter.API(), client, schedules)
+	defaultConversation := webexDefaultConversation(cfg)
+	if defaultConversation.ChannelID != "" {
+		startScheduleLoopWebex(ctx, adapter.API(), client, schedules, defaultConversation.ID())
+	}
+	startDeliveryRetryLoopWebex(ctx, adapter.API(), client, schedules)
+
+	st := store.ReadConversationState(defaultConversation.ID())
+	log.Printf("webex transport ready — conversation=%s backend=%s thread=%s cwd=%s (direct-message only)", defaultConversation.ID(), st.Backend, st.ThreadID, defaultCWD)
+
+	if err := adapter.Run(ctx); err != nil && ctx.Err() == nil && !dispatch.IsShuttingDown() {
+		return fmt.Errorf("webex serve failed: %w", err)
 	}
 	return nil
 }

@@ -74,7 +74,7 @@ While the agent is working, Moxie sends a continuous typing indicator. Activity 
 
 ## Running only Telegram
 
-If you have both transports configured but want to run only Telegram:
+If you have multiple transports configured but want to run only Telegram:
 
 ```bash
 moxie serve --transport telegram

@@ -17,6 +17,12 @@ Moxie reads its config from `~/.config/moxie/config.json`.
       "token": "xoxb-...",
       "app_token": "xapp-...",
       "channel_id": "C0123456789"
+    },
+    "webex": {
+      "provider": "webex",
+      "token": "Y2lzY29zcGFyazovL3VzL1RPS0VOL...",
+      "bot_id": "Y2lzY29zcGFyazovL3VzL1BFT1BMRS8...",
+      "channel_id": "Y2lzY29zcGFyazovL3VzL1JPT00v..."
     }
   },
   "workspaces": {
@@ -53,6 +59,19 @@ Moxie reads its config from `~/.config/moxie/config.json`.
 | `token` | Yes | Bot User OAuth Token (`xoxb-...`) |
 | `app_token` | Yes | App-Level Token (`xapp-...`) for Socket Mode |
 | `channel_id` | No | Default channel for scheduled messages |
+
+## Channel: Webex
+
+Webex support is currently **1:1 direct-message only**. Group spaces are intentionally ignored by the transport.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `provider` | Yes | `"webex"` |
+| `token` | Yes | Webex bot token |
+| `bot_id` | No | Bot person ID. Optional shortcut; Moxie can discover it from the token. |
+| `channel_id` | No | Default direct room ID for `moxie send --transport webex` and schedules |
+| `allowed_user_ids` | No | Allowlist of Webex person IDs permitted to talk to the bot |
+| `allowed_emails` | No | Allowlist of email addresses permitted to talk to the bot |
 
 ## Conversation state
 

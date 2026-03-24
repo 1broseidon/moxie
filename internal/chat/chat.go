@@ -16,6 +16,7 @@ type Provider string
 const (
 	ProviderTelegram Provider = "telegram"
 	ProviderSlack    Provider = "slack"
+	ProviderWebex    Provider = "webex"
 )
 
 type ConversationRef struct {
