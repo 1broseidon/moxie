@@ -160,7 +160,7 @@ func runSystemdUserAction(action string) {
 	cmd.Stdin = os.Stdin
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
-		os.Stdout.Write(out)
+		_, _ = os.Stdout.Write(out)
 	}
 	if err != nil {
 		output := strings.TrimSpace(string(out))

@@ -33,7 +33,12 @@ func webexDispatchCallbacks(api messenger, job *store.PendingJob) dispatch.Callb
 		}
 	}
 	return dispatch.Callbacks{
-		OnActivity: func(string) {},
+		OnActivity: func(activity string) {
+			stopInitial()
+			// Webex API does not support message editing, so we only send the
+			// initial "Working..." status. Subsequent activity events are logged
+			// but not pushed to the user to avoid message spam.
+		},
 		OnResult: func(result string) error {
 			stopInitial()
 			job.Result = result

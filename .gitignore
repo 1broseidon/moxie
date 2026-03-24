@@ -7,5 +7,4 @@ docs/.vitepress/dist
 docs/.vitepress/cache
 coverage.out
 
-moxie
-moxie.exe
+/moxie.exe

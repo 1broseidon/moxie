@@ -27,6 +27,10 @@ type messenger interface {
 
 type Messenger = messenger
 
+// verifiedDirectRooms caches room IDs that have been confirmed as direct (1:1).
+// Webex room types don't change, so this avoids redundant GetRoom API calls.
+var verifiedDirectRooms = make(map[string]struct{})
+
 type runningStatus struct {
 	api messenger
 	job *store.PendingJob
@@ -62,13 +66,18 @@ func ensureDirectConversation(api messenger, conversation chat.ConversationRef) 
 	if conversation.Provider != chat.ProviderWebex || strings.TrimSpace(conversation.ChannelID) == "" {
 		return fmt.Errorf("unsupported webex conversation: %+v", conversation)
 	}
-	room, err := api.GetRoom(context.Background(), conversation.ChannelID)
+	roomID := conversation.ChannelID
+	if _, ok := verifiedDirectRooms[roomID]; ok {
+		return nil
+	}
+	room, err := api.GetRoom(context.Background(), roomID)
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(room.Type) != "direct" {
-		return fmt.Errorf("webex room %s is type %q; only 1:1 direct rooms are supported", conversation.ChannelID, room.Type)
+		return fmt.Errorf("webex room %s is type %q; only 1:1 direct rooms are supported", roomID, room.Type)
 	}
+	verifiedDirectRooms[roomID] = struct{}{}
 	return nil
 }
 
@@ -84,12 +93,14 @@ func renderActivityText(activity string) string {
 	return "Working...\n" + activity
 }
 
+// show sends a one-time "Working..." status message. Unlike Slack, Webex does
+// not support message editing, so subsequent calls are no-ops to avoid spam.
 func (s *runningStatus) show(activity string) {
 	if s.api == nil || s.job == nil {
 		return
 	}
 	if s.st.StatusMessage.MessageID != "" {
-		return
+		return // already sent; Webex has no edit API
 	}
 	target := replyConversationForJob(s.job, s.st)
 	if err := ensureDirectConversation(s.api, target); err != nil {
@@ -216,7 +227,6 @@ func SendImmediate(api messenger, conversation chat.ConversationRef, text string
 		Status:            "ready",
 		Result:            text,
 	}
-	writeJobState(job.ID, jobState{ReplyConversation: conversation})
 	store.WriteJob(job)
 	ProcessJob(job, api, nil, nil)
 

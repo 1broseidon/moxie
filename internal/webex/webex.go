@@ -114,7 +114,7 @@ func (c *apiClient) doJSON(ctx context.Context, method, path string, body any, d
 		return fmt.Errorf("webex api %s %s failed: %s: %s", method, path, resp.Status, strings.TrimSpace(string(data)))
 	}
 	if dst == nil {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(dst)
@@ -186,6 +186,7 @@ type Adapter struct {
 	allowedUserIDs map[string]struct{}
 	allowedEmails  map[string]struct{}
 	lastSeen       map[string]string
+	lastPollTime   time.Time
 	pollInterval   time.Duration
 }
 
@@ -260,10 +261,11 @@ func senderName(personEmail string) string {
 
 func previewText(text string) string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
-	if len(text) <= 120 {
+	runes := []rune(text)
+	if len(runes) <= 120 {
 		return text
 	}
-	return text[:120] + "…"
+	return string(runes[:120]) + "…"
 }
 
 func (a *Adapter) senderAllowed(msg Message) bool {
@@ -308,64 +310,86 @@ func (a *Adapter) seedSeenState(ctx context.Context) error {
 	return nil
 }
 
+func roomIsStale(room Room, cutoff time.Time) bool {
+	if cutoff.IsZero() || room.LastActivity == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, room.LastActivity)
+	return err == nil && t.Before(cutoff)
+}
+
 func (a *Adapter) pollOnce(ctx context.Context) error {
 	rooms, err := a.api.ListDirectRooms(ctx, 100)
 	if err != nil {
 		return err
 	}
+	pollCutoff := a.lastPollTime
+	a.lastPollTime = time.Now()
 	for _, room := range rooms {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		messages, err := a.api.ListMessages(ctx, room.ID, 50)
-		if err != nil || len(messages) == 0 {
-			continue
+		if roomIsStale(room, pollCutoff) {
+			break // sorted by lastactivity desc, so remaining rooms are older
 		}
-		newestID := messages[0].ID
-		lastSeen, hadCursor := a.lastSeen[room.ID]
-		pending := unseenMessages(messages, lastSeen)
-		if !hadCursor {
-			// This room appeared after startup. Process its current messages instead of
-			// dropping the very first DM that created the room.
-			pending = unseenMessages(messages, "")
-		}
-		if len(pending) == 0 {
-			continue
-		}
-		a.lastSeen[room.ID] = newestID
-		for _, msg := range pending {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if strings.TrimSpace(msg.RoomType) != "" && strings.TrimSpace(msg.RoomType) != "direct" {
-				continue
-			}
-			if strings.TrimSpace(msg.PersonID) == a.botID {
-				continue
-			}
-			if !a.senderAllowed(msg) {
-				log.Printf("ignoring webex DM from unauthorized sender %s (%s)", strings.TrimSpace(msg.PersonEmail), strings.TrimSpace(msg.PersonID))
-				continue
-			}
-			text := strings.TrimSpace(msg.Text)
-			if text == "" {
-				continue
-			}
-			log.Printf("webex inbound DM from %s (%s): %s", strings.TrimSpace(msg.PersonEmail), strings.TrimSpace(msg.PersonID), previewText(text))
-			a.processInbound(inboundEnvelope{
-				inbound: chat.InboundMessage{
-					EventID:      msg.ID,
-					Source:       string(chat.ProviderWebex),
-					Conversation: webexConversation(msg.RoomID),
-					SenderName:   senderName(msg.PersonEmail),
-					Text:         text,
-					Prompt:       text,
-				},
-				reply: webexConversation(msg.RoomID),
-			})
+		if err := a.pollRoom(ctx, room); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (a *Adapter) pollRoom(ctx context.Context, room Room) error {
+	messages, err := a.api.ListMessages(ctx, room.ID, 50)
+	if err != nil || len(messages) == 0 {
+		return nil
+	}
+	newestID := messages[0].ID
+	lastSeen, hadCursor := a.lastSeen[room.ID]
+	pending := unseenMessages(messages, lastSeen)
+	if !hadCursor {
+		pending = unseenMessages(messages, "")
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	a.lastSeen[room.ID] = newestID
+	for _, msg := range pending {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		a.handleMessage(msg)
+	}
+	return nil
+}
+
+func (a *Adapter) handleMessage(msg Message) {
+	if strings.TrimSpace(msg.RoomType) != "" && strings.TrimSpace(msg.RoomType) != "direct" {
+		return
+	}
+	if strings.TrimSpace(msg.PersonID) == a.botID {
+		return
+	}
+	if !a.senderAllowed(msg) {
+		log.Printf("ignoring webex DM from unauthorized sender %s (%s)", strings.TrimSpace(msg.PersonEmail), strings.TrimSpace(msg.PersonID))
+		return
+	}
+	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		return
+	}
+	log.Printf("webex inbound DM from %s (%s): %s", strings.TrimSpace(msg.PersonEmail), strings.TrimSpace(msg.PersonID), previewText(text))
+	a.processInbound(inboundEnvelope{
+		inbound: chat.InboundMessage{
+			EventID:      msg.ID,
+			Source:       string(chat.ProviderWebex),
+			Conversation: webexConversation(msg.RoomID),
+			SenderName:   senderName(msg.PersonEmail),
+			Text:         text,
+			Prompt:       text,
+		},
+		reply: webexConversation(msg.RoomID),
+	})
 }
 
 func (a *Adapter) Run(ctx context.Context) error {
