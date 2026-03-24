@@ -2,6 +2,16 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.8] - 2026-03-24
+
+### Fixed
+
+- Subagent jobs now dispatch in parallel — previously ran sequentially, causing jobs to appear dropped when multiple subagents were dispatched simultaneously
+- In-flight tracking prevents ticker from re-dispatching jobs already being processed
+- Stop retrying delivered jobs in the hot loop — removed "delivered" from retry predicate to fix zombie retry loops (observed running for 2.5+ hours)
+- Replace PID-based serve lock with flock for race-free mutual exclusion (fixes TOCTOU race on PID recycling)
+- Robust PATH propagation for launchd schedule plists — detects minimal PATH and falls back to reading from the main service plist
+
 ## [0.2.7] - 2026-03-23
 
 ### Fixed
