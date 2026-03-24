@@ -2,6 +2,17 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.3.0] - 2026-03-24
+
+### Added
+
+- Webex transport for 1:1 direct messages — `moxie serve --transport webex`
+- Per-sender ACLs via `allowed_user_ids` and `allowed_emails`
+- Bot ID auto-discovery from Webex token
+- Webex schedule, subagent, and result delivery support
+- Room activity filtering to minimize API polling overhead
+- Room type caching to avoid redundant GetRoom calls
+
 ## [0.2.9] - 2026-03-24
 
 ### Changed
