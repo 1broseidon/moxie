@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1815,12 +1816,18 @@ type subagentTransports struct {
 	slackClient    *oneagent.Client
 	schedules      *scheduler.Store
 	maxDepth       int
+
+	// inFlight tracks which job IDs are currently being processed so the
+	// ticker doesn't re-dispatch them on the next tick.
+	mu       sync.Mutex
+	inFlight map[string]struct{}
 }
 
 func startSubagentWatcher(ctx context.Context, cfg store.Config, backends map[string]oneagent.Backend, schedules *scheduler.Store) {
 	st := subagentTransports{
 		schedules: schedules,
 		maxDepth:  cfg.MaxSubagentDepth(),
+		inFlight:  make(map[string]struct{}),
 	}
 
 	if _, err := cfg.Telegram(); err == nil {
@@ -1837,50 +1844,80 @@ func startSubagentWatcher(ctx context.Context, cfg store.Config, backends map[st
 	}
 
 	startTickerLoop(ctx, 3*time.Second, func() {
-		runSubagentJobs(st)
+		runSubagentJobs(&st)
 	})
 }
 
-func runSubagentJobs(st subagentTransports) {
+func runSubagentJobs(st *subagentTransports) {
 	jobs := store.ListJobs()
 	for _, job := range jobs {
 		if job.Source != "subagent" || (job.Status != "" && job.Status != "running" && job.Status != "ready") {
 			continue
 		}
+		if dispatch.IsShuttingDown() {
+			return
+		}
+
+		// Skip jobs that are already being processed by a previous tick.
+		st.mu.Lock()
+		if _, running := st.inFlight[job.ID]; running {
+			st.mu.Unlock()
+			continue
+		}
+		st.inFlight[job.ID] = struct{}{}
+		st.mu.Unlock()
+
 		job := job
 		log.Printf("dispatching subagent job %s (backend=%s depth=%d/%d)", job.ID, job.State.Backend, job.Depth, st.maxDepth)
 
 		provider := chat.ParseConversationID(job.ConversationID).Provider
+
+		var client *oneagent.Client
+		var deliver func(store.PendingJob) error
+
 		switch provider {
 		case chat.ProviderTelegram:
 			if st.telegramBot == nil || st.telegramClient == nil {
 				log.Printf("subagent job %s targets telegram but no telegram transport", job.ID)
+				st.mu.Lock()
+				delete(st.inFlight, job.ID)
+				st.mu.Unlock()
 				continue
 			}
-			dispatch.ProcessJob(&job, st.telegramClient, st.schedules, subagentCallbacks(
-				job, st.telegramClient, st.schedules,
-				func(synthJob store.PendingJob) error {
-					return botpkg.DeliverJobResult(st.telegramBot, &synthJob)
-				},
-			))
+			client = st.telegramClient
+			deliver = func(synthJob store.PendingJob) error {
+				return botpkg.DeliverJobResult(st.telegramBot, &synthJob)
+			}
 		case chat.ProviderSlack:
 			if st.slackAPI == nil || st.slackClient == nil {
 				log.Printf("subagent job %s targets slack but no slack transport", job.ID)
+				st.mu.Lock()
+				delete(st.inFlight, job.ID)
+				st.mu.Unlock()
 				continue
 			}
-			dispatch.ProcessJob(&job, st.slackClient, st.schedules, subagentCallbacks(
-				job, st.slackClient, st.schedules,
-				func(synthJob store.PendingJob) error {
-					return slackpkg.DeliverJobResult(st.slackAPI, &synthJob)
-				},
-			))
+			client = st.slackClient
+			deliver = func(synthJob store.PendingJob) error {
+				return slackpkg.DeliverJobResult(st.slackAPI, &synthJob)
+			}
 		default:
 			log.Printf("subagent job %s has unknown provider %s", job.ID, provider)
+			st.mu.Lock()
+			delete(st.inFlight, job.ID)
+			st.mu.Unlock()
+			continue
 		}
 
-		if dispatch.IsShuttingDown() {
-			return
-		}
+		go func() {
+			defer func() {
+				st.mu.Lock()
+				delete(st.inFlight, job.ID)
+				st.mu.Unlock()
+			}()
+			dispatch.ProcessJob(&job, client, st.schedules, subagentCallbacks(
+				job, client, st.schedules, deliver,
+			))
+		}()
 	}
 }
 
