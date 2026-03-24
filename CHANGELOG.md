@@ -2,6 +2,13 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.6] - 2026-03-23
+
+### Added
+
+- Exec schedule action (`--action exec`) for command-based notifications — runs a shell command and delivers stdout to the conversation, staying silent when the script produces no output
+- Platform and shell detection injected into agent system prompt for OS-appropriate script generation
+
 ## [0.2.5] - 2026-03-23
 
 ### Fixed
