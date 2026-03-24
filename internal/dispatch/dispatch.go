@@ -470,7 +470,10 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 }
 
 func isRetryable(job store.PendingJob) bool {
-	return job.Status == "ready" || job.Status == "delivered" || job.Status == "running"
+	// "delivered" jobs are NOT retried here — they are finalized at startup
+	// via RecoverPendingJobs. Including them caused infinite retry loops
+	// when finalization was blocked or the process restarted before cleanup.
+	return job.Status == "ready" || job.Status == "running"
 }
 
 func makeCallbacks(factory func(*store.PendingJob) Callbacks, job *store.PendingJob) Callbacks {

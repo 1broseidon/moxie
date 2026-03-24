@@ -2106,23 +2106,36 @@ func servePidPath() string {
 
 func acquireServeLock() func() {
 	pidPath := servePidPath()
-	if data, err := os.ReadFile(pidPath); err == nil {
-		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-		if err == nil && pid > 0 {
-			if proc, err := os.FindProcess(pid); err == nil {
-				if err := proc.Signal(syscall.Signal(0)); err == nil {
-					fatal("moxie serve is already running (pid %d). Kill it first or remove %s", pid, pidPath)
-				}
-			}
+	lockPath := pidPath + ".lock"
+
+	// Use flock for a race-free mutual exclusion check. The PID file
+	// is kept for informational purposes (external tools, debugging).
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
+		fatal("cannot create lock directory: %v", err)
+	}
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		fatal("cannot open lock file: %v", err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		// Read the PID file for a better error message.
+		existingPID := "unknown"
+		if data, readErr := os.ReadFile(pidPath); readErr == nil {
+			existingPID = strings.TrimSpace(string(data))
 		}
+		_ = lockFile.Close()
+		fatal("moxie serve is already running (pid %s). Kill it first or remove %s", existingPID, pidPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0700); err != nil {
-		fatal("cannot create pid directory: %v", err)
+
+	// Write PID for informational use.
+	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0600)
+
+	return func() {
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		_ = os.Remove(lockPath)
+		_ = os.Remove(pidPath)
 	}
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
-		fatal("cannot write pid file: %v", err)
-	}
-	return func() { os.Remove(pidPath) }
 }
 
 func cmdServe() {
