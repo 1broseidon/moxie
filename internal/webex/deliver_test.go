@@ -27,6 +27,12 @@ func (f *fakeMessenger) DeleteMessage(_ context.Context, messageID string) error
 	return nil
 }
 
+func (f *fakeMessenger) EditMessage(_ context.Context, messageID, roomID, text string) (Message, error) {
+	f.sentRooms = append(f.sentRooms, roomID)
+	f.sentTexts = append(f.sentTexts, "edit:"+text)
+	return Message{ID: messageID, RoomID: roomID, Text: text}, nil
+}
+
 func (f *fakeMessenger) SendMessageWithFile(_ context.Context, roomID, text, filePath string) (Message, error) {
 	f.sentRooms = append(f.sentRooms, roomID)
 	f.sentTexts = append(f.sentTexts, "file:"+filePath)

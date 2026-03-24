@@ -177,6 +177,16 @@ func (c *apiClient) DeleteMessage(ctx context.Context, messageID string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/messages/"+url.PathEscape(strings.TrimSpace(messageID)), nil, nil)
 }
 
+func (c *apiClient) EditMessage(ctx context.Context, messageID, roomID, text string) (Message, error) {
+	var msg Message
+	err := c.doJSON(ctx, http.MethodPut, "/messages/"+url.PathEscape(strings.TrimSpace(messageID)), createMessageRequest{
+		RoomID:   strings.TrimSpace(roomID),
+		Text:     text,
+		Markdown: text,
+	}, &msg)
+	return msg, err
+}
+
 // SendMessageWithFile sends a message with a local file attachment using multipart/form-data.
 // Webex allows at most one file per message.
 func (c *apiClient) SendMessageWithFile(ctx context.Context, roomID, text, filePath string) (Message, error) {

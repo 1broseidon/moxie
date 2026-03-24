@@ -22,6 +22,7 @@ var sendTagPattern = regexp.MustCompile(`(?s)<send>\s*(.*?)\s*</send>`)
 type messenger interface {
 	SendMessage(ctx context.Context, roomID, text string) (Message, error)
 	SendMessageWithFile(ctx context.Context, roomID, text, filePath string) (Message, error)
+	EditMessage(ctx context.Context, messageID, roomID, text string) (Message, error)
 	DeleteMessage(ctx context.Context, messageID string) error
 	GetRoom(ctx context.Context, roomID string) (Room, error)
 	DownloadFile(ctx context.Context, fileURL string) (string, error)
@@ -34,9 +35,10 @@ type Messenger = messenger
 var verifiedDirectRooms = make(map[string]struct{})
 
 type runningStatus struct {
-	api messenger
-	job *store.PendingJob
-	st  jobState
+	api      messenger
+	job      *store.PendingJob
+	st       jobState
+	lastText string
 }
 
 func newRunningStatus(api messenger, job *store.PendingJob) *runningStatus {
@@ -117,21 +119,35 @@ func renderActivityText(activity string) string {
 	return summary + "\n" + detail
 }
 
-// show sends a one-time "Working..." status message. Unlike Slack, Webex does
-// not support message editing, so subsequent calls are no-ops to avoid spam.
+// show sends or edits the status message with current activity. On the first
+// call it creates a new message; subsequent calls edit it in-place.
 func (s *runningStatus) show(activity string) {
 	if s.api == nil || s.job == nil {
 		return
 	}
-	if s.st.StatusMessage.MessageID != "" {
-		return // already sent; Webex has no edit API
+	text := renderActivityText(activity)
+	if text == s.lastText {
+		return
 	}
+
 	target := replyConversationForJob(s.job, s.st)
+
+	if s.st.StatusMessage.MessageID != "" {
+		// Edit existing status message in-place
+		if _, err := s.api.EditMessage(context.Background(), s.st.StatusMessage.MessageID, target.ChannelID, text); err != nil {
+			log.Printf("webex status edit error for %s: %v", s.st.StatusMessage.MessageID, err)
+			return
+		}
+		s.lastText = text
+		return
+	}
+
+	// First call — create the status message
 	if err := ensureDirectConversation(s.api, target); err != nil {
 		log.Printf("webex status send skipped: %v", err)
 		return
 	}
-	msg, err := s.api.SendMessage(context.Background(), target.ChannelID, renderActivityText(activity))
+	msg, err := s.api.SendMessage(context.Background(), target.ChannelID, text)
 	if err != nil {
 		log.Printf("webex status send error: %v", err)
 		return
@@ -141,6 +157,7 @@ func (s *runningStatus) show(activity string) {
 		Conversation: target,
 		MessageID:    msg.ID,
 	}
+	s.lastText = text
 	writeJobState(s.job.ID, s.st)
 }
 
