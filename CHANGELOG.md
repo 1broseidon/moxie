@@ -2,6 +2,12 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.7] - 2026-03-23
+
+### Fixed
+
+- Exec schedule jobs now use `bash -l` instead of `sh`, loading login profile PATH so tools like `claude` and `gog` are found on macOS
+
 ## [0.2.6] - 2026-03-23
 
 ### Added
