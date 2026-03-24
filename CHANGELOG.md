@@ -2,6 +2,18 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.2.9] - 2026-03-24
+
+### Changed
+
+- `/think` now passes through any value to the backend instead of validating against a hardcoded list — backends report invalid levels, allowing agents to self-heal
+- Bump oneagent to v0.11.13 (improved error handling, backend-side thinking validation)
+
+### Fixed
+
+- `moxie service install` now captures the user's actual PATH at install time instead of a hardcoded fallback — fixes backends like `pi` not being found when running as a service
+- `moxie service install` and `moxie service start/stop/restart` now detect missing systemd user sessions and suggest `sudo loginctl enable-linger <user>` instead of showing opaque "exit status 1" or "No medium found" errors
+
 ## [0.2.8] - 2026-03-24
 
 ### Fixed

@@ -334,13 +334,10 @@ func handleThinking(conversationID, arg string, st store.State) string {
 		}
 		return "Thinking: " + level
 	}
-	switch arg {
-	case "off", "none":
+	if arg == "off" || arg == "none" {
 		st.Thinking = ""
-	case "low", "medium", "high":
+	} else {
 		st.Thinking = arg
-	default:
-		return "Usage: /think [off|low|medium|high]"
 	}
 	store.WriteConversationState(conversationID, st)
 	if st.Thinking == "" {

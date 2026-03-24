@@ -201,6 +201,7 @@ func systemdUnitContents(binaryPath string, opts serviceInstallOptions, workingD
 	for _, arg := range args {
 		quoted = append(quoted, quoteSystemdArg(arg))
 	}
+	env := serviceEnvironment()
 	unit := `[Unit]
 Description=Moxie chat agent
 After=network-online.target
@@ -215,8 +216,8 @@ RestartSec=5
 SuccessExitStatus=143 SIGTERM
 TimeoutStopSec=90
 KillMode=mixed
-Environment=PATH=%h/bin:%h/.local/bin:%h/go/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
-Environment=HOME=%h
+Environment=PATH=` + env["PATH"] + `
+Environment=HOME=` + env["HOME"] + `
 
 [Install]
 WantedBy=default.target
@@ -297,7 +298,31 @@ func quoteSystemdArg(arg string) string {
 
 func runCommand(name string, args ...string) ([]byte, error) {
 	cmd := exec.Command(name, args...)
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			err = fmt.Errorf("%w\n%s", err, msg)
+		}
+		if isSystemdBusError(msg) {
+			err = fmt.Errorf("%w\n\nHint: the systemd user session is not available.\nRun: sudo loginctl enable-linger %s\nThen retry: moxie service install", err, currentUsername())
+		}
+	}
+	return out, err
+}
+
+func isSystemdBusError(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "no medium found") ||
+		strings.Contains(lower, "failed to connect to bus") ||
+		strings.Contains(lower, "no such file or directory") && strings.Contains(lower, "/run/user/")
+}
+
+func currentUsername() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return "<username>"
 }
 
 func promptRequiredLine(reader *bufio.Reader, label string) string {

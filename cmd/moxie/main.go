@@ -156,10 +156,16 @@ func serviceSuccessMessage(action string) string {
 
 func runSystemdUserAction(action string) {
 	cmd := exec.Command("systemctl", "--user", action, defaultServiceUnit)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		os.Stdout.Write(out)
+	}
+	if err != nil {
+		output := strings.TrimSpace(string(out))
+		if isSystemdBusError(output) {
+			fatal("systemctl --user %s %s failed: %v\n\nThe systemd user session is not available.\nRun: sudo loginctl enable-linger %s\nThen retry: moxie service %s", action, defaultServiceUnit, err, currentUsername(), action)
+		}
 		fatal("systemctl --user %s %s failed: %v", action, defaultServiceUnit, err)
 	}
 }
