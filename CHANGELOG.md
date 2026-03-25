@@ -2,6 +2,12 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.3.2] - 2026-03-25
+
+### Fixed
+
+- Block subagent chaining from synthesis turns — prevents runaway loops where a synthesis turn spawns another subagent
+
 ## [0.3.1] - 2026-03-24
 
 ### Added
