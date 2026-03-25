@@ -1185,6 +1185,16 @@ func shouldBlockOnSubagent(parent *store.PendingJob) bool {
 	return parent != nil && parent.Depth > 0
 }
 
+func validateSubagentParent(parent *store.PendingJob) error {
+	if parent == nil {
+		return nil
+	}
+	if parent.Source == "subagent-synthesis" {
+		return fmt.Errorf("subagent chaining from synthesis turns is disabled — inspect the result in the main thread or ask the user for another step")
+	}
+	return nil
+}
+
 func subagentBlockingResultPath(jobID string) string {
 	return filepath.Join(store.JobsDir(), jobID+".result")
 }
@@ -1266,6 +1276,10 @@ func cmdSubagent() {
 	maxDepth := cfg.MaxSubagentDepth()
 
 	parent := findParentJob(args.parentJob)
+	if err := validateSubagentParent(parent); err != nil {
+		log.Printf("blocked subagent chaining from synthesis turn (parent=%s)", parent.ID)
+		fatal("%v", err)
+	}
 	blocking := shouldBlockOnSubagent(parent)
 
 	depth := parent.Depth + 1

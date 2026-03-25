@@ -92,6 +92,23 @@ func TestFindParentJobPrefersCurrentJobEnv(t *testing.T) {
 	}
 }
 
+func TestValidateSubagentParentBlocksSynthesisTurns(t *testing.T) {
+	err := validateSubagentParent(&store.PendingJob{Source: "subagent-synthesis"})
+	if err == nil {
+		t.Fatal("expected synthesis parent validation error")
+	}
+	if got := err.Error(); got != "subagent chaining from synthesis turns is disabled — inspect the result in the main thread or ask the user for another step" {
+		t.Fatalf("validateSubagentParent() error = %q", got)
+	}
+
+	if err := validateSubagentParent(&store.PendingJob{Source: "subagent"}); err != nil {
+		t.Fatalf("validateSubagentParent(subagent) err = %v, want nil", err)
+	}
+	if err := validateSubagentParent(&store.PendingJob{Source: "telegram"}); err != nil {
+		t.Fatalf("validateSubagentParent(telegram) err = %v, want nil", err)
+	}
+}
+
 func TestCmdSubagentBlocksForNestedParentAndUsesImmediateParent(t *testing.T) {
 	restoreStore := store.SetConfigDir(t.TempDir())
 	t.Cleanup(restoreStore)
