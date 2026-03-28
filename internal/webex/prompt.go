@@ -71,6 +71,11 @@ func ApplySystemPrompt(backends map[string]oneagent.Backend) {
 		var others []string
 		for _, n := range allNames {
 			if n != name {
+				if b, ok := backends[n]; ok {
+					if _, found := oneagent.ResolveBackendProgram(b); !found {
+						continue
+					}
+				}
 				others = append(others, n)
 			}
 		}
