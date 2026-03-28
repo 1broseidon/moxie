@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1120,6 +1121,7 @@ type subagentArgs struct {
 var (
 	subagentBlockingPollInterval = 50 * time.Millisecond
 	subagentBlockingTimeout      = 10 * time.Minute
+	skipSubagentPreflight        = false
 )
 
 func parseSubagentArgs() *subagentArgs {
@@ -1285,6 +1287,19 @@ func cmdSubagent() {
 	depth := parent.Depth + 1
 	if depth > maxDepth {
 		fatal("subagent depth limit reached (%d/%d) — handle this task directly", depth, maxDepth)
+	}
+
+	// Preflight: verify the backend CLI exists and is ready before queuing.
+	if !skipSubagentPreflight {
+		backends, err := loadServeBackends()
+		if err != nil {
+			fatal("preflight: failed to load backends: %v", err)
+		}
+		if b, ok := backends[args.backend]; !ok {
+			fatal("preflight: unknown backend %q — available: %s", args.backend, availableBackendNames(backends))
+		} else if err := oneagent.PreflightCheckBackend(args.backend, b); err != nil {
+			fatal("preflight: %v", err)
+		}
 	}
 
 	delegationCtx := parent.Prompt
@@ -2388,6 +2403,15 @@ func loadServeBackends() (map[string]oneagent.Backend, error) {
 		IncludeEmbedded: true,
 		OverridePath:    store.ConfigFile("backends.json"),
 	})
+}
+
+func availableBackendNames(backends map[string]oneagent.Backend) string {
+	names := make([]string, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 func installServeSignalHandler(cancel func()) (<-chan serveSignalAction, func()) {

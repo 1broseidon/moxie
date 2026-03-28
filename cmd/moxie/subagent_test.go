@@ -114,6 +114,9 @@ func TestCmdSubagentBlocksForNestedParentAndUsesImmediateParent(t *testing.T) {
 	t.Cleanup(restoreStore)
 	writeSubagentTestConfig(t)
 
+	skipSubagentPreflight = true
+	t.Cleanup(func() { skipSubagentPreflight = false })
+
 	prevPoll := subagentBlockingPollInterval
 	prevTimeout := subagentBlockingTimeout
 	subagentBlockingPollInterval = 10 * time.Millisecond
