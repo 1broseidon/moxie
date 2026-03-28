@@ -17,6 +17,10 @@ const (
 	defaultSubagentMaxAttempts     = 3
 	defaultSubagentStallTimeout    = 5 * time.Minute
 	defaultSubagentProgressTimeout = 0 * time.Minute
+	defaultMaxPendingSubagents     = 5
+	defaultMaxSchedulesPerConv     = 20
+	defaultMaxJobsPerMinute        = 10
+	defaultMaxScheduleGeneration   = 3
 )
 
 var defaultSubagentRetryBackoff = []time.Duration{0, 30 * time.Second, 2 * time.Minute}
@@ -30,6 +34,10 @@ type Config struct {
 	SubagentStallTimeout    string                   `json:"subagent_stall_timeout,omitempty"`
 	SubagentProgressTimeout string                   `json:"subagent_progress_timeout,omitempty"`
 	SubagentRetryBackoff    []string                 `json:"subagent_retry_backoff,omitempty"`
+	MaxPendingSubagents     int                      `json:"max_pending_subagents,omitempty"`
+	MaxSchedulesPerConv     int                      `json:"max_schedules_per_conv,omitempty"`
+	MaxJobsPerMinute        int                      `json:"max_jobs_per_minute,omitempty"`
+	MaxScheduleGeneration   int                      `json:"max_schedule_generation,omitempty"`
 }
 
 type ChannelConfig struct {
@@ -51,6 +59,10 @@ type configFile struct {
 	SubagentStallTimeout    string                   `json:"subagent_stall_timeout,omitempty"`
 	SubagentProgressTimeout string                   `json:"subagent_progress_timeout,omitempty"`
 	SubagentRetryBackoff    []string                 `json:"subagent_retry_backoff,omitempty"`
+	MaxPendingSubagents     int                      `json:"max_pending_subagents,omitempty"`
+	MaxSchedulesPerConv     int                      `json:"max_schedules_per_conv,omitempty"`
+	MaxJobsPerMinute        int                      `json:"max_jobs_per_minute,omitempty"`
+	MaxScheduleGeneration   int                      `json:"max_schedule_generation,omitempty"`
 	Token                   string                   `json:"token,omitempty"`
 	ChatID                  int64                    `json:"chat_id,omitempty"`
 }
@@ -206,6 +218,59 @@ func (cfg Config) SubagentRetryBackoffDurations() []time.Duration {
 	return backoff
 }
 
+func (cfg Config) MaxPendingSubagentsLimit() int {
+	if cfg.MaxPendingSubagents > 0 {
+		return cfg.MaxPendingSubagents
+	}
+	return defaultMaxPendingSubagents
+}
+
+func (cfg Config) MaxSchedulesPerConvLimit() int {
+	if cfg.MaxSchedulesPerConv > 0 {
+		return cfg.MaxSchedulesPerConv
+	}
+	return defaultMaxSchedulesPerConv
+}
+
+func (cfg Config) MaxJobsPerMinuteLimit() int {
+	if cfg.MaxJobsPerMinute > 0 {
+		return cfg.MaxJobsPerMinute
+	}
+	return defaultMaxJobsPerMinute
+}
+
+func (cfg Config) MaxScheduleGenerationLimit() int {
+	if cfg.MaxScheduleGeneration > 0 {
+		return cfg.MaxScheduleGeneration
+	}
+	return defaultMaxScheduleGeneration
+}
+
+// CountPendingSubagentJobs returns the number of active subagent jobs for a conversation.
+func CountPendingSubagentJobs(conversationID string) int {
+	count := 0
+	for _, job := range ListJobs() {
+		if job.ConversationID == conversationID &&
+			(job.Source == "subagent" || job.Source == "subagent-synthesis") &&
+			job.Status != "delivered" {
+			count++
+		}
+	}
+	return count
+}
+
+// CountRecentJobs returns the number of jobs written in the last minute for a source.
+func CountRecentJobs(source string) int {
+	cutoff := time.Now().Add(-1 * time.Minute)
+	count := 0
+	for _, job := range ListJobs() {
+		if job.Source == source && job.Updated.After(cutoff) {
+			count++
+		}
+	}
+	return count
+}
+
 func parseConfigDuration(raw string, fallback time.Duration) time.Duration {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -310,6 +375,7 @@ type PendingJob struct {
 	DelegationContext  string           `json:"delegation_context,omitempty"`
 	ReplyConversation  string           `json:"reply_conversation,omitempty"`
 	Depth              int              `json:"depth,omitempty"`
+	ScheduleGeneration int              `json:"schedule_generation,omitempty"`
 	ConversationID     string           `json:"conversation_id"`
 	Source             string           `json:"source,omitempty"`
 	Prompt             string           `json:"prompt"`
@@ -529,4 +595,50 @@ func Check(err error) {
 	if err != nil {
 		log.Printf("error: %v", err)
 	}
+}
+
+// RateLimitDir returns the directory for rate limit state files.
+func RateLimitDir() string {
+	return filepath.Join(ConfigDir(), "ratelimits")
+}
+
+// CheckRateLimit returns an error if the given key has exceeded maxPerMinute
+// calls in the last 60 seconds. Each call records a timestamp.
+func CheckRateLimit(key string, maxPerMinute int) error {
+	if maxPerMinute <= 0 {
+		return nil
+	}
+	dir := RateLimitDir()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil // fail open
+	}
+	path := filepath.Join(dir, key+".log")
+	now := time.Now()
+	cutoff := now.Add(-1 * time.Minute)
+
+	// Read existing timestamps.
+	var timestamps []time.Time
+	if data, err := os.ReadFile(path); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(line)); err == nil {
+				if t.After(cutoff) {
+					timestamps = append(timestamps, t)
+				}
+			}
+		}
+	}
+
+	if len(timestamps) >= maxPerMinute {
+		return fmt.Errorf("rate limit exceeded (%d/%d per minute for %q) — slow down", len(timestamps), maxPerMinute, key)
+	}
+
+	// Append the current timestamp.
+	timestamps = append(timestamps, now)
+	var buf strings.Builder
+	for _, t := range timestamps {
+		buf.WriteString(t.Format(time.RFC3339Nano))
+		buf.WriteByte('\n')
+	}
+	_ = os.WriteFile(path, []byte(buf.String()), 0600)
+	return nil
 }

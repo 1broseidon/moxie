@@ -393,3 +393,57 @@ func TestCleanupJobTempRemovesFile(t *testing.T) {
 		t.Fatalf("expected temp file to be removed, stat err = %v", err)
 	}
 }
+
+func TestCountPendingSubagentJobs(t *testing.T) {
+	restore := SetConfigDir(t.TempDir())
+	t.Cleanup(restore)
+
+	WriteJob(PendingJob{ID: "j1", ConversationID: "tg:1", Source: "subagent", Status: "running"})
+	WriteJob(PendingJob{ID: "j2", ConversationID: "tg:1", Source: "subagent", Status: "ready"})
+	WriteJob(PendingJob{ID: "j3", ConversationID: "tg:1", Source: "subagent", Status: "delivered"})
+	WriteJob(PendingJob{ID: "j4", ConversationID: "tg:1", Source: "telegram", Status: "running"})
+	WriteJob(PendingJob{ID: "j5", ConversationID: "tg:2", Source: "subagent", Status: "running"})
+
+	got := CountPendingSubagentJobs("tg:1")
+	if got != 2 { // j1 (running) + j2 (ready); j3 delivered, j4 not subagent, j5 different conv
+		t.Fatalf("CountPendingSubagentJobs = %d, want 2", got)
+	}
+}
+
+func TestCheckRateLimit(t *testing.T) {
+	restore := SetConfigDir(t.TempDir())
+	t.Cleanup(restore)
+
+	for i := 0; i < 3; i++ {
+		if err := CheckRateLimit("test-send", 3); err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i+1, err)
+		}
+	}
+	if err := CheckRateLimit("test-send", 3); err == nil {
+		t.Fatal("expected rate limit error on 4th call")
+	}
+}
+
+func TestConfigLimitAccessors(t *testing.T) {
+	cfg := Config{}
+	if got := cfg.MaxPendingSubagentsLimit(); got != defaultMaxPendingSubagents {
+		t.Fatalf("MaxPendingSubagentsLimit = %d, want %d", got, defaultMaxPendingSubagents)
+	}
+	if got := cfg.MaxSchedulesPerConvLimit(); got != defaultMaxSchedulesPerConv {
+		t.Fatalf("MaxSchedulesPerConvLimit = %d, want %d", got, defaultMaxSchedulesPerConv)
+	}
+	if got := cfg.MaxJobsPerMinuteLimit(); got != defaultMaxJobsPerMinute {
+		t.Fatalf("MaxJobsPerMinuteLimit = %d, want %d", got, defaultMaxJobsPerMinute)
+	}
+	if got := cfg.MaxScheduleGenerationLimit(); got != defaultMaxScheduleGeneration {
+		t.Fatalf("MaxScheduleGenerationLimit = %d, want %d", got, defaultMaxScheduleGeneration)
+	}
+
+	cfg2 := Config{MaxPendingSubagents: 99, MaxSchedulesPerConv: 50, MaxJobsPerMinute: 30, MaxScheduleGeneration: 7}
+	if got := cfg2.MaxPendingSubagentsLimit(); got != 99 {
+		t.Fatalf("custom MaxPendingSubagentsLimit = %d, want 99", got)
+	}
+	if got := cfg2.MaxScheduleGenerationLimit(); got != 7 {
+		t.Fatalf("custom MaxScheduleGenerationLimit = %d, want 7", got)
+	}
+}

@@ -103,6 +103,7 @@ type Schedule struct {
 	Model          string       `json:"model,omitempty"`
 	ThreadID       string       `json:"thread_id,omitempty"`
 	CWD            string       `json:"cwd,omitempty"`
+	Generation     int          `json:"generation,omitempty"`
 	CreatedAt      time.Time    `json:"created_at"`
 	NextRun        time.Time    `json:"next_run"`
 	LastRun        time.Time    `json:"last_run,omitempty"`
@@ -125,6 +126,8 @@ type AddInput struct {
 	ThreadID       string
 	CWD            string
 	Now            time.Time
+	Generation     int // tracks how many schedule→dispatch→schedule cycles deep we are
+	MaxPerConv     int // max schedules allowed per conversation (0 = no limit)
 }
 
 type Store struct {
@@ -298,6 +301,19 @@ func (s *Store) Add(input AddInput) (Schedule, error) {
 	schedules, err := s.load()
 	if err != nil {
 		return Schedule{}, err
+	}
+
+	// Enforce per-conversation schedule cap.
+	if input.MaxPerConv > 0 && input.ConversationID != "" {
+		count := 0
+		for _, existing := range schedules {
+			if existing.ConversationID == input.ConversationID {
+				count++
+			}
+		}
+		if count >= input.MaxPerConv {
+			return Schedule{}, fmt.Errorf("schedule limit reached (%d/%d for this conversation) — delete an existing schedule first", count, input.MaxPerConv)
+		}
 	}
 
 	now := input.Now
@@ -559,6 +575,7 @@ func (s *Store) buildSchedule(input AddInput, now time.Time) (Schedule, error) {
 		Model:          strings.TrimSpace(input.Model),
 		ThreadID:       strings.TrimSpace(input.ThreadID),
 		CWD:            strings.TrimSpace(input.CWD),
+		Generation:     input.Generation,
 		CreatedAt:      now,
 	}
 

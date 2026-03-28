@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -848,5 +849,74 @@ func TestSaveAtomicallyReplacesReadOnlyScheduleFile(t *testing.T) {
 	stored := readStoredScheduleRecord(t, store.path)
 	if got := strings.Trim(string(stored["id"]), `"`); got != "sch-replaced" {
 		t.Fatalf("stored id = %q, want %q", got, "sch-replaced")
+	}
+}
+
+func TestAddRejectsWhenPerConvLimitReached(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	// Create 2 schedules for conversation "tg:1" with a cap of 2.
+	for i := 0; i < 2; i++ {
+		_, err := store.Add(AddInput{
+			Trigger:        TriggerInterval,
+			Action:         ActionSend,
+			Every:          "1h",
+			Text:           fmt.Sprintf("schedule %d", i),
+			ConversationID: "tg:1",
+			MaxPerConv:     2,
+			Now:            now,
+		})
+		if err != nil {
+			t.Fatalf("add schedule %d: %v", i, err)
+		}
+	}
+
+	// 3rd should fail.
+	_, err := store.Add(AddInput{
+		Trigger:        TriggerInterval,
+		Action:         ActionSend,
+		Every:          "1h",
+		Text:           "one too many",
+		ConversationID: "tg:1",
+		MaxPerConv:     2,
+		Now:            now,
+	})
+	if err == nil {
+		t.Fatal("expected error for exceeding per-conversation schedule limit")
+	}
+
+	// Different conversation should still work.
+	_, err = store.Add(AddInput{
+		Trigger:        TriggerInterval,
+		Action:         ActionSend,
+		Every:          "1h",
+		Text:           "different conv",
+		ConversationID: "tg:2",
+		MaxPerConv:     2,
+		Now:            now,
+	})
+	if err != nil {
+		t.Fatalf("different conversation should succeed: %v", err)
+	}
+}
+
+func TestAddCarriesGeneration(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
+
+	sc, err := store.Add(AddInput{
+		Trigger:    TriggerInterval,
+		Action:     ActionDispatch,
+		Every:      "1h",
+		Text:       "gen 2 schedule",
+		Generation: 2,
+		Now:        now,
+	})
+	if err != nil {
+		t.Fatalf("add schedule: %v", err)
+	}
+	if sc.Generation != 2 {
+		t.Fatalf("Generation = %d, want 2", sc.Generation)
 	}
 }

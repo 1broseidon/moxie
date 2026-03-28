@@ -362,6 +362,12 @@ func cmdSend() {
 	if err != nil {
 		fatal("%v", err)
 	}
+
+	// Rate limit sends to prevent agent-driven chat flooding.
+	if err := store.CheckRateLimit("send", cfg.MaxJobsPerMinuteLimit()); err != nil {
+		fatal("%v", err)
+	}
+
 	transport, err := chooseServeTransport(cfg, parseTransportFlag(2))
 	if err != nil {
 		fatal("%v", err)
@@ -911,6 +917,16 @@ func cmdScheduleAdd(scheduleStore *scheduler.Store, args []string) {
 	applyScheduleAddOverrides(&input, *backendFlag, *modelFlag, *threadFlag, *cwdFlag)
 	applyScheduleActionDefaults(&input)
 
+	// Resource limits: cap schedules per conversation and inherit generation.
+	input.MaxPerConv = cfg.MaxSchedulesPerConvLimit()
+	if parent := findParentJobOptional(); parent != nil {
+		input.Generation = parentScheduleGeneration(parent) + 1
+		maxGen := cfg.MaxScheduleGenerationLimit()
+		if input.Generation > maxGen {
+			fatal("schedule generation limit reached (%d/%d) — a scheduled dispatch created this agent, which is trying to create another schedule. This recursive pattern is capped.", input.Generation, maxGen)
+		}
+	}
+
 	sc, err := scheduleStore.Add(input)
 	if err != nil {
 		fatal("schedule add failed: %v", err)
@@ -1183,6 +1199,32 @@ func findParentJob(parentID string) *store.PendingJob {
 	return parent
 }
 
+// findParentJobOptional returns the current parent job if called from within
+// an agent dispatch, or nil if not in a dispatch context. Unlike findParentJob
+// it never fatals.
+func findParentJobOptional() *store.PendingJob {
+	currentID := currentJobID()
+	if currentID == "" {
+		return nil
+	}
+	for _, j := range store.ListJobs() {
+		j := j
+		if j.ID == currentID {
+			return &j
+		}
+	}
+	return nil
+}
+
+// parentScheduleGeneration extracts the schedule generation from a parent job.
+// If the parent was itself created by a schedule, it carries that schedule's generation.
+func parentScheduleGeneration(parent *store.PendingJob) int {
+	if parent == nil {
+		return 0
+	}
+	return parent.ScheduleGeneration
+}
+
 func shouldBlockOnSubagent(parent *store.PendingJob) bool {
 	return parent != nil && parent.Depth > 0
 }
@@ -1287,6 +1329,20 @@ func cmdSubagent() {
 	depth := parent.Depth + 1
 	if depth > maxDepth {
 		fatal("subagent depth limit reached (%d/%d) — handle this task directly", depth, maxDepth)
+	}
+
+	// Width limit: cap concurrent subagent jobs per conversation.
+	maxWidth := cfg.MaxPendingSubagentsLimit()
+	pending := store.CountPendingSubagentJobs(parent.ConversationID)
+	if pending >= maxWidth {
+		fatal("subagent width limit reached (%d/%d pending for this conversation) — wait for existing subagents to finish or handle this task directly", pending, maxWidth)
+	}
+
+	// Rate limit: cap total jobs written per minute from subagent source.
+	maxPerMin := cfg.MaxJobsPerMinuteLimit()
+	recent := store.CountRecentJobs("subagent")
+	if recent >= maxPerMin {
+		fatal("subagent rate limit reached (%d/%d jobs in the last minute) — slow down or handle this task directly", recent, maxPerMin)
 	}
 
 	// Preflight: verify the backend CLI exists and is ready before queuing.
@@ -1686,12 +1742,13 @@ func buildScheduledJob(sc scheduler.Schedule, fallbackConversationID string) (st
 	}
 
 	job := store.PendingJob{
-		ID:             store.NewJobID(),
-		ScheduleID:     sc.ID,
-		ConversationID: conversationID,
-		Source:         "schedule",
-		CWD:            sc.CWD,
-		State:          scheduleState(sc),
+		ID:                 store.NewJobID(),
+		ScheduleID:         sc.ID,
+		ConversationID:     conversationID,
+		Source:             "schedule",
+		CWD:                sc.CWD,
+		ScheduleGeneration: sc.Generation,
+		State:              scheduleState(sc),
 	}
 	switch sc.Action {
 	case scheduler.ActionSend:
