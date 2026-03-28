@@ -3,7 +3,7 @@ module github.com/1broseidon/moxie
 go 1.25.7
 
 require (
-	github.com/1broseidon/oneagent v0.12.1
+	github.com/1broseidon/oneagent v0.12.2
 	gopkg.in/telebot.v4 v4.0.0-beta.7
 )
 
