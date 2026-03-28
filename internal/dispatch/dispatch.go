@@ -212,6 +212,15 @@ func piSessionDir(cwd string) string {
 	return filepath.Join(home, ".pi", "agent", "sessions", name)
 }
 
+// preflightJob checks whether the backend CLI for a job is available and healthy.
+// Skipped when the client has no backends loaded (e.g. in tests where RunModel is mocked).
+func preflightJob(client *oneagent.Client, job *store.PendingJob) error {
+	if client == nil || job == nil || len(client.Backends) == 0 {
+		return nil
+	}
+	return client.PreflightCheck(job.State.Backend)
+}
+
 func normalizeModelResult(result string) string {
 	switch strings.TrimSpace(result) {
 	case "", "Done — nothing to report.", "Done - nothing to report.":
@@ -267,6 +276,23 @@ func processJob(job *store.PendingJob, client *oneagent.Client, schedules *sched
 	if job.Source == "exec" {
 		processExecJob(job, schedules, callbacks)
 		return
+	}
+
+	// Preflight: verify the backend CLI is present and healthy before
+	// spending time on the job. Delivers the error instantly instead of
+	// retrying a doomed invocation through the supervisor loop.
+	if client != nil && job.Status != "ready" && job.Status != "delivered" {
+		if err := preflightJob(client, job); err != nil {
+			log.Printf("preflight failed for %s (%s): %v", job.ID, job.State.Backend, err)
+			job.Result = fmt.Sprintf("preflight error: %v", err)
+			job.Status = "ready"
+			store.WriteJob(*job)
+			if callbacks.OnStatusClear != nil {
+				callbacks.OnStatusClear()
+			}
+			deliverAndFinalize(job, schedules, callbacks)
+			return
+		}
 	}
 
 	if job.Status != "ready" && job.Status != "delivered" {
