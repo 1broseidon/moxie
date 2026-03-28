@@ -248,3 +248,23 @@ func TestSplitText(t *testing.T) {
 		})
 	}
 }
+
+func TestSubagentFormattingRules(t *testing.T) {
+	tests := []struct {
+		provider Provider
+		contains string
+	}{
+		{ProviderTelegram, "Telegram HTML"},
+		{ProviderSlack, "Slack mrkdwn"},
+		{ProviderWebex, "Webex"},
+		{"unknown", "concise"},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.provider), func(t *testing.T) {
+			got := SubagentFormattingRules(tt.provider)
+			if !strings.Contains(got, tt.contains) {
+				t.Fatalf("SubagentFormattingRules(%s) = %q, want to contain %q", tt.provider, got, tt.contains)
+			}
+		})
+	}
+}

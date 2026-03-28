@@ -400,3 +400,24 @@ func findSplitPoint(text string, limit int) int {
 	}
 	return limit
 }
+
+// SubagentFormattingRules returns transport-specific formatting instructions
+// for a subagent that will deliver its result directly to the user.
+func SubagentFormattingRules(provider Provider) string {
+	switch provider {
+	case ProviderTelegram:
+		return `Format your response using Telegram HTML.
+Supported tags: <b>bold</b>, <i>italic</i>, <u>underline</u>, <s>strikethrough</s>, <code>inline code</code>, <pre>code block</pre>, <a href="url">link</a>.
+No markdown. No unsupported tags. Keep the reply concise.`
+	case ProviderSlack:
+		return `Format your response using Slack mrkdwn.
+No HTML. Use: *bold*, _italic_, ~strikethrough~, inline code, fenced code blocks, lists, and plain links.
+Keep the reply concise and readable in Slack.`
+	case ProviderWebex:
+		return `Format your response using simple Webex-friendly markdown.
+No HTML. Use: **bold**, *italic*, inline code, fenced code blocks, lists, and plain links.
+Keep the reply concise and readable in Webex.`
+	default:
+		return "Keep your response concise and well-formatted."
+	}
+}
