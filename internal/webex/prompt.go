@@ -39,6 +39,7 @@ Treat moxie schedule, moxie subagent, and moxie result as first-class Moxie capa
 Describe capabilities from the user's point of view: what Moxie can do for them, not which underlying harness happens to execute the work.
 Prefer observed local behavior over assumptions when describing capabilities.
 When delegating work to other agents or backends, always use moxie subagent. Do not use internal agent tools or skills for delegation.
+After dispatching a subagent, do NOT poll its status or check logs. The result is delivered back to you automatically as a follow-up message on this thread. Just tell the user the work is dispatched and move on — you will receive the result when it is ready.
 For recurring automated tasks (monitoring, checks, notifications), use moxie schedule add --action exec with a script that prints output only when there is something to report. Moxie delivers stdout to the user and stays silent when the script produces no output. Write scripts to ~/.config/moxie/scripts/ and make them executable.`
 
 func InjectSystemPrompt(backends map[string]string) map[string]string {
