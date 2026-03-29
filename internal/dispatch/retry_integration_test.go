@@ -2,6 +2,7 @@ package dispatch_test
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -437,5 +438,37 @@ func TestExecJobDeliversWhenOutputPresent(t *testing.T) {
 	}
 	if store.JobExists("job-exec-loud") {
 		t.Fatal("exec job should be removed after successful delivery")
+	}
+}
+
+// TestExecJobDeliversErrorOnFailure verifies that a failing exec script
+// delivers the error message to the user instead of silently dropping it.
+func TestExecJobDeliversErrorOnFailure(t *testing.T) {
+	useTempStoreDir(t)
+
+	job := &store.PendingJob{
+		ID:             "job-exec-fail",
+		Source:         "exec",
+		ConversationID: "telegram:1",
+		Prompt:         "exit 1",
+	}
+	store.WriteJob(*job)
+
+	var deliveredResult string
+	dispatch.ProcessJob(job, nil, nil, dispatch.Callbacks{
+		OnResult: func(result string) error {
+			deliveredResult = result
+			return nil
+		},
+	})
+
+	if deliveredResult == "" {
+		t.Fatal("exec failure should deliver an error message to the user")
+	}
+	if !strings.Contains(deliveredResult, "Scheduled task failed") {
+		t.Fatalf("expected error message, got: %s", deliveredResult)
+	}
+	if store.JobExists("job-exec-fail") {
+		t.Fatal("failed exec job should be cleaned up after delivery")
 	}
 }

@@ -408,9 +408,26 @@ func WriteJSON(name string, v any) {
 	Check(os.WriteFile(ConfigFile(name), data, 0600))
 }
 
+// defaultBackendName is the fallback backend used when no backend is set.
+// Set at startup via SetDefaultBackend based on which CLIs are installed.
+var defaultBackendName = "claude"
+
+// SetDefaultBackend overrides the fallback backend name. Call this at startup
+// after resolving which backends are actually installed.
+func SetDefaultBackend(name string) {
+	if strings.TrimSpace(name) != "" {
+		defaultBackendName = strings.TrimSpace(name)
+	}
+}
+
+// DefaultBackend returns the current fallback backend name.
+func DefaultBackend() string {
+	return defaultBackendName
+}
+
 func normalizeState(s State) State {
 	if s.Backend == "" {
-		s.Backend = "claude"
+		s.Backend = defaultBackendName
 	}
 	if s.ThreadID == "" {
 		s.ThreadID = "chat"

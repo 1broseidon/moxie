@@ -331,8 +331,15 @@ func processExecJob(job *store.PendingJob, schedules *scheduler.Store, callbacks
 		result, err := runExecJob(job)
 		if err != nil {
 			log.Printf("exec job %s failed: %v", job.ID, err)
-			finalizeSchedule(job, schedules)
-			store.RemoveJob(job.ID)
+			// Deliver the error to the user so they know their scheduled task broke.
+			errMsg := fmt.Sprintf("⚠️ Scheduled task failed:\n%s\n\nError: %v", truncateExecPrompt(job.Prompt), err)
+			job.Result = errMsg
+			job.Status = "ready"
+			store.WriteJob(*job)
+			if callbacks.OnStatusClear != nil {
+				callbacks.OnStatusClear()
+			}
+			deliverAndFinalize(job, schedules, callbacks)
 			return
 		}
 		if strings.TrimSpace(result) == "" {
@@ -377,6 +384,14 @@ func finalizeSchedule(job *store.PendingJob, schedules *scheduler.Store) {
 			log.Printf("schedule completion error for %s: %v", job.ScheduleID, err)
 		}
 	}
+}
+
+func truncateExecPrompt(prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if len(prompt) > 200 {
+		return prompt[:200] + "…"
+	}
+	return prompt
 }
 
 func runExecJob(job *store.PendingJob) (string, error) {

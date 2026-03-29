@@ -1648,7 +1648,7 @@ func scheduleState(sc scheduler.Schedule) store.State {
 		CWD:      sc.CWD,
 	}
 	if st.Backend == "" {
-		st.Backend = "claude"
+		st.Backend = store.DefaultBackend()
 	}
 	if st.ThreadID == "" {
 		st.ThreadID = "chat"
@@ -2406,6 +2406,13 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 		return serveSignalNone, fmt.Errorf("no backends: %w", err)
 	}
 
+	// Set the default backend to the first installed one, so fresh
+	// conversations and schedules don't silently target a missing CLI.
+	if resolved := resolveDefaultBackend(backends); resolved != "" {
+		store.SetDefaultBackend(resolved)
+		log.Printf("default backend: %s", resolved)
+	}
+
 	schedules := newScheduleStore()
 	if err := schedules.Repair(store.JobExists); err != nil {
 		log.Printf("schedule repair failed: %v", err)
@@ -2464,6 +2471,32 @@ func loadServeBackends() (map[string]oneagent.Backend, error) {
 		IncludeEmbedded: true,
 		OverridePath:    store.ConfigFile("backends.json"),
 	})
+}
+
+// resolveDefaultBackend returns the name of the first installed backend,
+// preferring common names in a stable order. Returns "" if none are found.
+func resolveDefaultBackend(backends map[string]oneagent.Backend) string {
+	// Preferred order — check common backends first for a predictable default.
+	preferred := []string{"claude", "pi", "codex", "opencode", "gemini"}
+	for _, name := range preferred {
+		if b, ok := backends[name]; ok {
+			if _, found := oneagent.ResolveBackendProgram(b); found {
+				return name
+			}
+		}
+	}
+	// Fall back to any installed backend.
+	names := make([]string, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, found := oneagent.ResolveBackendProgram(backends[name]); found {
+			return name
+		}
+	}
+	return ""
 }
 
 func availableBackendNames(backends map[string]oneagent.Backend) string {
