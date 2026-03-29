@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -1826,12 +1827,39 @@ func fireScheduleExecution(schedules *scheduler.Store, sc scheduler.Schedule) (s
 	return jobID, false, nil
 }
 
+var (
+	scheduleDueFailures atomic.Int32
+	scheduleDueAlerted  atomic.Bool
+)
+
+const scheduleDueAlertThreshold = 5
+
+func trackScheduleDueError(err error, conversationID string, sendAlert func(string)) {
+	n := scheduleDueFailures.Add(1)
+	log.Printf("schedule due check failed (%d consecutive): %v", n, err)
+	if int(n) >= scheduleDueAlertThreshold && scheduleDueAlerted.CompareAndSwap(false, true) {
+		msg := fmt.Sprintf("⚠️ Schedule system error: %d consecutive due-check failures. Schedules may not be firing.\n\nLast error: %v", n, err)
+		if sendAlert != nil {
+			sendAlert(msg)
+		}
+	}
+}
+
+func resetScheduleDueFailures() {
+	scheduleDueFailures.Store(0)
+	scheduleDueAlerted.Store(false)
+}
+
 func runDueSchedulesTelegram(bot *tb.Bot, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
 	due, err := schedules.Due(time.Now())
 	if err != nil {
-		log.Printf("schedule due check failed: %v", err)
+		trackScheduleDueError(err, fallbackConversationID, func(msg string) {
+			conversation := chat.ParseConversationID(fallbackConversationID)
+			botpkg.SendChunked(bot, conversation, msg)
+		})
 		return
 	}
+	resetScheduleDueFailures()
 	for _, sc := range due {
 		job, err := buildScheduledJob(sc, fallbackConversationID)
 		if err != nil {
@@ -1890,9 +1918,13 @@ func startDeliveryRetryLoopTelegram(ctx context.Context, bot *tb.Bot, client *on
 func runDueSchedulesSlack(api slackpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
 	due, err := schedules.Due(time.Now())
 	if err != nil {
-		log.Printf("schedule due check failed: %v", err)
+		trackScheduleDueError(err, fallbackConversationID, func(msg string) {
+			conversation := chat.ParseConversationID(fallbackConversationID)
+			slackpkg.SendPlainText(api, conversation, msg)
+		})
 		return
 	}
+	resetScheduleDueFailures()
 	for _, sc := range due {
 		job, err := buildScheduledJob(sc, fallbackConversationID)
 		if err != nil {
@@ -1932,9 +1964,13 @@ func startDeliveryRetryLoopSlack(ctx context.Context, api slackpkg.Messenger, cl
 func runDueSchedulesWebex(api webexpkg.Messenger, client *oneagent.Client, schedules *scheduler.Store, fallbackConversationID string) {
 	due, err := schedules.Due(time.Now())
 	if err != nil {
-		log.Printf("schedule due check failed: %v", err)
+		trackScheduleDueError(err, fallbackConversationID, func(msg string) {
+			conversation := chat.ParseConversationID(fallbackConversationID)
+			webexpkg.SendPlainText(api, conversation, msg)
+		})
 		return
 	}
+	resetScheduleDueFailures()
 	for _, sc := range due {
 		job, err := buildScheduledJob(sc, fallbackConversationID)
 		if err != nil {

@@ -1,28 +1,9 @@
 package slack
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
-	"sort"
-	"strings"
-
+	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/oneagent"
 )
-
-func detectShell() string {
-	if s := os.Getenv("SHELL"); s != "" {
-		return filepath.Base(s)
-	}
-	if runtime.GOOS == "windows" {
-		if os.Getenv("PSModulePath") != "" {
-			return "powershell"
-		}
-		return "cmd"
-	}
-	return ""
-}
 
 const SlackSystemPrompt = `You are responding via a Slack bot. Format replies using Slack-compatible markdown (mrkdwn).
 Do not use HTML. Avoid markdown tables and overly complex formatting that may render poorly in Slack.
@@ -42,52 +23,9 @@ After dispatching a subagent, do NOT poll its status or check logs. The result i
 For recurring automated tasks (monitoring, checks, notifications), use moxie schedule add --action exec with a script that prints output only when there is something to report. Moxie delivers stdout to the user and stays silent when the script produces no output. Write scripts to ~/.config/moxie/scripts/ and make them executable.`
 
 func InjectSystemPrompt(backends map[string]string) map[string]string {
-	injected := make(map[string]string, len(backends))
-	for name, systemPrompt := range backends {
-		if strings.TrimSpace(systemPrompt) != "" {
-			injected[name] = strings.TrimSpace(systemPrompt) + "\n\n" + SlackSystemPrompt
-			continue
-		}
-		injected[name] = SlackSystemPrompt
-	}
-	return injected
+	return prompt.InjectTransportPrompt(backends, SlackSystemPrompt)
 }
 
 func ApplySystemPrompt(backends map[string]oneagent.Backend) {
-	systemPrompts := make(map[string]string, len(backends))
-	for name, backend := range backends {
-		systemPrompts[name] = backend.SystemPrompt
-	}
-
-	injected := InjectSystemPrompt(systemPrompts)
-
-	var allNames []string
-	for name := range backends {
-		allNames = append(allNames, name)
-	}
-	sort.Strings(allNames)
-
-	for name, backend := range backends {
-		var others []string
-		for _, n := range allNames {
-			if n != name {
-				if b, ok := backends[n]; ok {
-					if _, found := oneagent.ResolveBackendProgram(b); !found {
-						continue
-					}
-				}
-				others = append(others, n)
-			}
-		}
-		identity := fmt.Sprintf("\nYou are running on the %s backend. Platform: %s/%s", name, runtime.GOOS, runtime.GOARCH)
-		if shell := detectShell(); shell != "" {
-			identity += fmt.Sprintf(", shell: %s", shell)
-		}
-		identity += "."
-		if len(others) > 0 {
-			identity += fmt.Sprintf(" Available backends for moxie subagent: %s.", strings.Join(others, ", "))
-		}
-		backend.SystemPrompt = injected[name] + identity
-		backends[name] = backend
-	}
+	prompt.ApplySystemPrompts(backends, SlackSystemPrompt)
 }
