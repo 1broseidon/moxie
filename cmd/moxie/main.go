@@ -1265,30 +1265,19 @@ func waitForBlockingSubagentResult(job store.PendingJob) (string, error) {
 }
 
 func buildSubagentPrompt(text string, parent *store.PendingJob, budget int) string {
-	var parts []string
-
-	// Compile conversation context from the parent thread.
-	if parent.State.ThreadID != "" {
-		if thread, err := oneagent.LoadThread(parent.State.ThreadID); err == nil && thread != nil && len(thread.Turns) > 0 {
-			if ctx, _ := thread.CompileContext(budget); ctx != "" {
-				ctx = stripSubagentLines(ctx)
-				if ctx != "" {
-					parts = append(parts, "Context from parent conversation:\n"+ctx)
-				}
-			}
-		}
+	if parent.State.ThreadID == "" {
+		return text
 	}
-
-	parts = append(parts, "Task:\n"+text)
-
-	// Inject transport-specific formatting and reply framing so the
-	// subagent's result can be delivered directly to the user without
-	// a separate synthesis run.
-	provider := chat.ParseConversationID(parent.ConversationID).Provider
-	formatting := chat.SubagentFormattingRules(provider)
-	parts = append(parts, "Reply instructions:\nYour response will be sent directly to the user. Frame it as a natural reply to their original request — concise, conversational, and complete.\n"+formatting)
-
-	return strings.Join(parts, "\n\n")
+	thread, err := oneagent.LoadThread(parent.State.ThreadID)
+	if err != nil || thread == nil || len(thread.Turns) == 0 {
+		return text
+	}
+	ctx, _ := thread.CompileContext(budget)
+	ctx = stripSubagentLines(ctx)
+	if ctx == "" {
+		return text
+	}
+	return "Context from parent conversation:\n" + ctx + "\n\nTask:\n" + text
 }
 
 func resolveReplyConversation(parent *store.PendingJob) string {
@@ -2128,8 +2117,6 @@ func runSubagentJobs(st *subagentTransports) {
 	}
 }
 
-const directDeliveryMaxLen = 4096
-
 func subagentCallbacks(job store.PendingJob, synthClient *oneagent.Client, schedules *scheduler.Store, deliver func(store.PendingJob) error) dispatch.Callbacks {
 	return dispatch.Callbacks{
 		OnActivity:    func(string) {},
@@ -2139,13 +2126,7 @@ func subagentCallbacks(job store.PendingJob, synthClient *oneagent.Client, sched
 			if job.BlockingResultPath != "" {
 				return writeBlockingSubagentResult(job, result)
 			}
-			// Deliver the subagent result directly to the user.
-			// Fall back to synthesis only for oversized results that need summarization.
-			if len([]rune(result)) > directDeliveryMaxLen {
-				log.Printf("subagent %s result is %d runes — falling back to synthesis", job.ID, len([]rune(result)))
-				return dispatchSynthesis(job, result, synthClient, schedules, deliver)
-			}
-			return deliverSubagentDirect(job, result, deliver)
+			return dispatchSynthesis(job, result, synthClient, schedules, deliver)
 		},
 	}
 }
@@ -2153,75 +2134,6 @@ func subagentCallbacks(job store.PendingJob, synthClient *oneagent.Client, sched
 // deliverSubagentDirect delivers a subagent result straight to the user's chat
 // without a synthesis run. It also records the result as a turn on the parent
 // conversation thread so future messages have context.
-func deliverSubagentDirect(job store.PendingJob, result string, deliver func(store.PendingJob) error) error {
-	// Record the subagent result on the parent conversation thread.
-	parentThreadID := job.SynthesisState.ThreadID
-	if parentThreadID == "" {
-		if convState := store.ReadConversationState(job.ConversationID); convState.ThreadID != "" {
-			parentThreadID = convState.ThreadID
-		}
-	}
-	if parentThreadID != "" {
-		recordSubagentTurnOnParent(parentThreadID, job, result)
-	}
-
-	// Build a minimal delivery job and deliver.
-	replyConversation := job.ReplyConversation
-	if replyConversation == "" {
-		replyConversation = job.ConversationID
-	}
-	deliveryJob := store.PendingJob{
-		ID:                store.NewJobID(),
-		ConversationID:    job.ConversationID,
-		ReplyConversation: replyConversation,
-		Source:            "subagent-direct",
-		Status:            "ready",
-		Result:            result,
-	}
-	store.WriteJob(deliveryJob)
-	log.Printf("direct delivery for subagent %s via %s (conv=%s result_len=%d)",
-		job.ID, deliveryJob.ID, deliveryJob.ConversationID, len(result))
-	if deliver != nil {
-		if err := deliver(deliveryJob); err != nil {
-			log.Printf("direct delivery FAILED for %s: %v — keeping job for retry", deliveryJob.ID, err)
-			return err
-		}
-		log.Printf("direct delivery succeeded for %s", deliveryJob.ID)
-	} else {
-		log.Printf("direct delivery for %s: no deliver function — skipping send", deliveryJob.ID)
-	}
-	store.RemoveJob(deliveryJob.ID)
-	return nil
-}
-
-// recordSubagentTurnOnParent appends the subagent's result as an assistant turn
-// on the parent conversation thread, so subsequent messages see the context.
-func recordSubagentTurnOnParent(threadID string, job store.PendingJob, result string) {
-	thread, err := oneagent.LoadThread(threadID)
-	if err != nil || thread == nil {
-		log.Printf("could not load parent thread %s for subagent turn: %v", threadID, err)
-		return
-	}
-	task := job.DelegatedTask
-	if task == "" {
-		task = job.Prompt
-	}
-	if len(task) > 200 {
-		task = task[:200]
-	}
-	turn := oneagent.Turn{
-		Role:    "assistant",
-		Content: result,
-		Backend: job.State.Backend,
-		Source:  "subagent",
-		TS:      time.Now().UTC().Format(time.RFC3339),
-	}
-	thread.Turns = append(thread.Turns, turn)
-	if err := thread.Save(); err != nil {
-		log.Printf("could not save subagent turn on parent thread %s: %v", threadID, err)
-	}
-}
-
 // dispatchSynthesis creates a synthesis job on the parent conversation's thread.
 // It is intentionally queued instead of run inline so subagent completion does
 // not block on the parent conversation lock. Delivery retry/recovery loops will
