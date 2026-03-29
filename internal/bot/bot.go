@@ -261,9 +261,16 @@ func SendChunked(bot sender, conversation chat.ConversationRef, text string) err
 		return err
 	}
 
-	for _, chunk := range chat.SplitText(text, 4000) {
-		if _, err := bot.Send(tb.ChatID(chatID), chunk, tb.ModeHTML); err != nil {
-			log.Printf("send error: %v", err)
+	chunks := chat.SplitText(text, 4000)
+	if len(chunks) == 0 {
+		log.Printf("SendChunked: no chunks to send (text len=%d)", len(text))
+		return fmt.Errorf("no content to send")
+	}
+
+	for i, chunk := range chunks {
+		msg, err := bot.Send(tb.ChatID(chatID), chunk, tb.ModeHTML)
+		if err != nil {
+			log.Printf("send error (chunk %d/%d, %d chars): %v", i+1, len(chunks), len(chunk), err)
 			if !strings.Contains(strings.ToLower(err.Error()), "can't parse entities") {
 				if firstErr == nil {
 					firstErr = err
@@ -277,21 +284,31 @@ func SendChunked(bot sender, conversation chat.ConversationRef, text string) err
 				continue
 			}
 
-			if _, plainErr := bot.Send(tb.ChatID(chatID), plainChunk); plainErr != nil {
+			msg, plainErr := bot.Send(tb.ChatID(chatID), plainChunk)
+			if plainErr != nil {
 				log.Printf("plain text resend error: %v", plainErr)
 				if firstErr == nil {
 					firstErr = plainErr
 				}
 				continue
 			}
+			log.Printf("sent plain fallback chunk %d/%d → msg %d", i+1, len(chunks), msg.ID)
 			sentAny = true
 			continue
+		}
+		if msg != nil {
+			log.Printf("sent chunk %d/%d (%d chars) → msg %d to %s", i+1, len(chunks), len(chunk), msg.ID, conversation.ID())
+		} else {
+			log.Printf("sent chunk %d/%d (%d chars) but got nil message from API", i+1, len(chunks), len(chunk))
 		}
 		sentAny = true
 	}
 
-	if !sentAny && firstErr != nil {
-		return firstErr
+	if !sentAny {
+		if firstErr != nil {
+			return firstErr
+		}
+		return fmt.Errorf("no chunks were delivered (text len=%d, chunks=%d)", len(text), len(chunks))
 	}
 	return nil
 }
@@ -485,6 +502,8 @@ func emptyResultMessage(backend string) string {
 func DeliverJobResult(bot sender, job *PendingJob) error {
 	paths, text := SplitResponseFiles(job.Result)
 	conversation := conversationFromID(job.ConversationID)
+	log.Printf("DeliverJobResult %s: conv=%s result_len=%d text_len=%d files=%d",
+		job.ID, conversation.ID(), len(job.Result), len(text), len(paths))
 	failures := SendTaggedFiles(bot, conversation, paths)
 	if len(failures) > 0 {
 		if text != "" {
@@ -495,8 +514,13 @@ func DeliverJobResult(bot sender, job *PendingJob) error {
 	}
 	if text == "" && len(paths) == 0 {
 		text = emptyResultMessage(job.State.Backend)
+		log.Printf("DeliverJobResult %s: result was empty, using fallback message", job.ID)
 	}
-	return SendChunked(bot, conversation, text)
+	err := SendChunked(bot, conversation, text)
+	if err != nil {
+		log.Printf("DeliverJobResult %s: SendChunked failed: %v", job.ID, err)
+	}
+	return err
 }
 
 func SendImmediate(bot sender, conversation chat.ConversationRef, text string) (string, bool) {

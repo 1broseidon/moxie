@@ -2179,12 +2179,16 @@ func deliverSubagentDirect(job store.PendingJob, result string, deliver func(sto
 		Result:            result,
 	}
 	store.WriteJob(deliveryJob)
-	log.Printf("direct delivery for subagent %s via %s", job.ID, deliveryJob.ID)
+	log.Printf("direct delivery for subagent %s via %s (conv=%s result_len=%d)",
+		job.ID, deliveryJob.ID, deliveryJob.ConversationID, len(result))
 	if deliver != nil {
 		if err := deliver(deliveryJob); err != nil {
-			log.Printf("direct delivery failed for %s: %v", deliveryJob.ID, err)
+			log.Printf("direct delivery FAILED for %s: %v — keeping job for retry", deliveryJob.ID, err)
 			return err
 		}
+		log.Printf("direct delivery succeeded for %s", deliveryJob.ID)
+	} else {
+		log.Printf("direct delivery for %s: no deliver function — skipping send", deliveryJob.ID)
 	}
 	store.RemoveJob(deliveryJob.ID)
 	return nil
