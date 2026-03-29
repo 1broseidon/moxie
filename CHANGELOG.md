@@ -2,6 +2,27 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.3.3] - 2026-03-29
+
+### Added
+
+- Preflight backend check before subagent dispatch — fails fast with an actionable error when the target backend CLI is missing or unhealthy, instead of silently retrying a doomed job three times
+- Preflight check inside `processJob` so jobs entering through any path (chat, schedules, recovery) also fail fast; error is delivered to the user as a normal message
+- Resource limits to prevent runaway fan-out and schedule abuse, all configurable via `config.json`:
+  - `max_pending_subagents` (default 5) — max concurrent subagent jobs per conversation
+  - `max_schedules_per_conv` (default 20) — max schedules per conversation
+  - `max_jobs_per_minute` (default 10) — rate limit on `moxie send` and subagent dispatch
+  - `max_schedule_generation` (default 3) — caps schedule→dispatch→schedule recursion cycles
+- Default backend auto-detected at startup from installed CLIs — checks in preferred order (claude → pi → codex → opencode → gemini → any installed), logs the resolved default; no longer silently defaults to `claude` on systems where it is not installed
+
+### Fixed
+
+- Exec schedule job failures are now delivered to the user as a warning message (`⚠️ Scheduled task failed: …`) instead of silently removing the job with no notification
+- System prompt now tells the agent not to poll subagent status after dispatch — results arrive automatically via synthesis, eliminating unnecessary `moxie subagent list/show` calls
+- Available backends in the system prompt are now filtered to CLIs actually installed on the system — prevents the agent from attempting to delegate to backends that will fail preflight
+- Synthesis prompt now instructs the agent to summarize the result with key findings and outcomes rather than just replying "done"
+- Delivery logging hardened — `SendChunked` logs message IDs, chunk counts, and returns an error when nothing is delivered; `DeliverJobResult` logs job ID, conversation, result length, and file count
+
 ## [0.3.2] - 2026-03-25
 
 ### Fixed

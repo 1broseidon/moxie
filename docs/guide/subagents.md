@@ -61,3 +61,19 @@ Subagents can themselves create subagents, but this is capped at a configurable 
   "subagent_max_depth": 3
 }
 ```
+
+## Resource limits
+
+Moxie enforces limits to prevent runaway fan-out and abuse. All are configurable in `config.json`:
+
+| Limit | Default | Description |
+|-------|---------|-------------|
+| `max_pending_subagents` | `5` | Max concurrent subagent jobs per conversation |
+| `max_jobs_per_minute` | `10` | Rate limit on dispatch and `moxie send` |
+| `max_schedule_generation` | `3` | Max schedule→dispatch→schedule recursion cycles |
+
+When a limit is hit, the dispatch fails immediately with a descriptive error rather than queuing silently.
+
+## Preflight checks
+
+Before a subagent job is written, Moxie runs a preflight check against the target backend CLI. If the CLI is missing or unhealthy, the dispatch fails immediately with an actionable error listing available backends. This also applies to jobs entering through any other path (schedule dispatches, recovery after restart) — doomed jobs fail fast instead of retrying three times silently.

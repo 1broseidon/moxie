@@ -19,6 +19,15 @@ If only one transport is configured, `--transport` can be omitted.
 |--------|-------------|
 | `send` | Deliver a text message to the chat |
 | `dispatch` | Run the text as an agent prompt and deliver the result |
+| `exec` | Run a shell command and deliver stdout to the chat; stays silent when the script produces no output |
+
+When an `exec` job fails (non-zero exit or execution error), Moxie delivers a warning to the conversation:
+
+```
+⚠️ Scheduled task failed: <script> — Error: <reason>
+```
+
+This ensures failures are never silently dropped.
 
 ## Triggers
 
@@ -138,6 +147,10 @@ moxie schedule fire <id>
 ```
 
 `moxie schedule fire <id>` is the internal execution path used by native `launchd` and Task Scheduler jobs. It is useful for operators and tests, but normal schedule usage should go through `moxie schedule add`, `list`, `show`, and `rm`.
+
+## Schedule limits
+
+Each conversation can have at most 20 schedules (configurable via `max_schedules_per_conv` in `config.json`). `moxie schedule add` returns an error when the limit is reached. To prevent runaway loops where a dispatch schedule creates further schedules, a generation counter is tracked and capped at 3 (configurable via `max_schedule_generation`).
 
 ## Dispatch context
 

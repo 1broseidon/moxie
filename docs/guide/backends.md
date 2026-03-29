@@ -6,7 +6,7 @@ Moxie dispatches messages to supported agent CLIs like Claude, Codex, Gemini, Pi
 
 | Backend | CLI | Install | Notes |
 |---------|-----|---------|-------|
-| Claude | `claude` | `npm install -g @anthropic-ai/claude-code` | Default backend |
+| Claude | `claude` | `npm install -g @anthropic-ai/claude-code` | Preferred default |
 | Codex | `codex` | `npm install -g @openai/codex` | Sandboxed execution |
 | Gemini | `gemini` | `npm install -g @google/gemini-cli` | Requires Google auth |
 | Pi | `pi` | `npm install -g @anthropics/pi` | Multi-model routing |
@@ -21,6 +21,12 @@ command -v gemini
 command -v pi
 command -v opencode
 ```
+
+## Default backend
+
+Moxie auto-detects the default backend at startup by checking which CLIs are installed, in this preferred order: `claude` → `pi` → `codex` → `opencode` → `gemini` → any installed CLI. The resolved default is logged at startup. If no backend CLI is found, Moxie starts but will fail fast on the first dispatch with a clear error.
+
+You can override the default per conversation with `/model <backend>`.
 
 ## Switching backends
 
