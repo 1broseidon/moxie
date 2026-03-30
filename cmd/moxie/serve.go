@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	botpkg "github.com/1broseidon/moxie/internal/bot"
 	"github.com/1broseidon/moxie/internal/chat"
@@ -259,13 +260,19 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 	// ready before the first audio message arrives.
 	go prompt.WarmWhisper()
 
-	schedules := newScheduleStore()
-	if err := schedules.Repair(store.JobExists); err != nil {
-		log.Printf("schedule repair failed: %v", err)
-	}
 	transports, err := chooseServeTransports(cfg, requestedTransport)
 	if err != nil {
 		return serveSignalNone, err
+	}
+	schedules := newScheduleStore()
+	if !cfg.RecoverPendingJobsOnStartupEnabled() {
+		discardPendingJobsOnStartup()
+	}
+	if err := schedules.Repair(store.JobExists); err != nil {
+		log.Printf("schedule repair failed: %v", err)
+	}
+	if !cfg.RunOverdueSchedulesOnStartupEnabled() {
+		skipOverdueSchedulesOnStartup(cfg, schedules, transports)
 	}
 
 	dispatch.SetShuttingDown(false)
@@ -311,6 +318,52 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 
 	err = runServeSupervisor(ctx, runtimes)
 	return serveSignalActionFromChannel(actionCh), err
+}
+
+func discardPendingJobsOnStartup() {
+	const reason = "job was discarded on startup because recover_pending_jobs_on_startup=false"
+	botpkg.DiscardPendingJobs(reason)
+	dispatch.DiscardPendingJobs(reason)
+}
+
+func fallbackConversationIDForTransport(cfg store.Config, transport string) string {
+	conversation, err := defaultConversationForTransport(cfg, transport)
+	if err != nil {
+		return ""
+	}
+	return conversation.ID()
+}
+
+func skipOverdueSchedulesOnStartup(cfg store.Config, schedules *scheduler.Store, transports []string) {
+	for _, transport := range transports {
+		skipOverdueSchedulesForTransport(schedules, transport, fallbackConversationIDForTransport(cfg, transport))
+	}
+}
+
+func skipOverdueSchedulesForTransport(schedules *scheduler.Store, transport, fallbackConversationID string) {
+	now := time.Now()
+	due, err := schedules.Due(now)
+	if err != nil {
+		log.Printf("startup overdue schedule check failed for %s: %v", transport, err)
+		return
+	}
+	provider := chat.Provider(strings.TrimSpace(transport))
+	for _, sc := range due {
+		conversation := chat.ParseConversationID(scheduledConversationID(sc, fallbackConversationID))
+		if conversation.Provider != provider {
+			continue
+		}
+		skipped, err := schedules.Skip(sc.ID, now)
+		if err != nil {
+			log.Printf("startup overdue schedule skip failed for %s: %v", sc.ID, err)
+			continue
+		}
+		if skipped.Spec.Trigger == scheduler.TriggerAt {
+			log.Printf("discarded missed one-shot schedule %s during startup", sc.ID)
+			continue
+		}
+		log.Printf("skipped overdue schedule %s during startup; next run %s", sc.ID, skipped.NextRun.Format("2006-01-02 15:04 MST"))
+	}
 }
 
 func loadServeBackends() (map[string]oneagent.Backend, error) {
@@ -406,7 +459,9 @@ func runTelegramTransport(ctx context.Context, cfg store.Config, defaultCWD stri
 		return fmt.Errorf("bot init failed: %w", err)
 	}
 
-	botpkg.RecoverPendingJobs(bot, client, schedules)
+	if cfg.RecoverPendingJobsOnStartupEnabled() {
+		botpkg.RecoverPendingJobs(bot, client, schedules)
+	}
 	if botpkg.ReadCursor() == 0 {
 		botpkg.SeedCursor(bot, getUpdates)
 	}
@@ -460,7 +515,9 @@ func runSlackTransport(ctx context.Context, cfg store.Config, defaultCWD string,
 		return fmt.Errorf("slack init failed: %w", err)
 	}
 
-	slackpkg.RecoverPendingJobs(adapter.API(), client, schedules)
+	if cfg.RecoverPendingJobsOnStartupEnabled() {
+		slackpkg.RecoverPendingJobs(adapter.API(), client, schedules)
+	}
 	defaultConversation := slackDefaultConversation(cfg)
 	if defaultConversation.ChannelID != "" {
 		startScheduleLoopSlack(ctx, adapter.API(), client, schedules, defaultConversation.ID())
@@ -493,7 +550,9 @@ func runWebexTransport(ctx context.Context, cfg store.Config, defaultCWD string,
 		return fmt.Errorf("webex init failed: %w", err)
 	}
 
-	webexpkg.RecoverPendingJobs(adapter.API(), client, schedules)
+	if cfg.RecoverPendingJobsOnStartupEnabled() {
+		webexpkg.RecoverPendingJobs(adapter.API(), client, schedules)
+	}
 	defaultConversation := webexDefaultConversation(cfg)
 	if defaultConversation.ChannelID != "" {
 		startScheduleLoopWebex(ctx, adapter.API(), client, schedules, defaultConversation.ID())

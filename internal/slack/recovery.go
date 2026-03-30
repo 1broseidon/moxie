@@ -24,6 +24,10 @@ func RecoverPendingJobs(api messenger, client *oneagent.Client, schedules *sched
 	}, isSlackJob)
 }
 
+func DiscardPendingJobs(reason string) bool {
+	return dispatch.DiscardPendingJobs(reason, isSlackJob)
+}
+
 func RetryDeliverableJobs(api messenger, client *oneagent.Client, schedules *scheduler.Store) bool {
 	return dispatch.RetryDeliverableJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		return slackDispatchCallbacks(api, job)

@@ -30,6 +30,8 @@ Moxie reads its config from `~/.config/moxie/config.json`.
     "ops": "/home/user/projects/ops"
   },
   "default_cwd": "/home/user/.local/share/moxie/workspace",
+  "recover_pending_jobs_on_startup": false,
+  "run_overdue_schedules_on_startup": false,
   "subagent_max_depth": 3,
   "max_pending_subagents": 5,
   "max_schedules_per_conv": 20,
@@ -45,11 +47,15 @@ Moxie reads its config from `~/.config/moxie/config.json`.
 | `channels` | object | | Transport configurations (see below) |
 | `workspaces` | object | `{}` | Named directory shortcuts for `/cwd` |
 | `default_cwd` | string | platform-specific workspace | Default working directory when no conversation override or explicit `--cwd` is set |
+| `recover_pending_jobs_on_startup` | bool | `true` | When `false`, discard persisted pending jobs on startup instead of replaying them |
+| `run_overdue_schedules_on_startup` | bool | `true` | When `false`, skip missed in-process schedule executions on startup instead of catching them up immediately |
 | `subagent_max_depth` | int | `3` | Maximum nesting depth for subagent delegation |
 | `max_pending_subagents` | int | `5` | Maximum concurrent subagent jobs per conversation — dispatch is rejected with an error when this limit is reached |
 | `max_schedules_per_conv` | int | `20` | Maximum schedules per conversation — `moxie schedule add` is rejected when this limit is reached |
 | `max_jobs_per_minute` | int | `10` | Rate limit on `moxie send` and subagent dispatch (jobs per minute per process) |
 | `max_schedule_generation` | int | `3` | Maximum schedule→dispatch→schedule recursion depth — prevents runaway loops where a dispatch schedule creates more schedules |
+
+If you do not want Moxie to resume interrupted jobs or immediately run missed Linux fallback schedules after a restart, set both startup flags to `false` and restart the service.
 
 ## Channel: Telegram
 

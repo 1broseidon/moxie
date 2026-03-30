@@ -2,6 +2,19 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.4.1] - 2026-03-30
+
+### Added
+
+- Startup policy flags in `config.json`:
+  - `recover_pending_jobs_on_startup` (default `true`) to control whether persisted pending jobs are replayed on startup
+  - `run_overdue_schedules_on_startup` (default `true`) to control whether overdue in-process schedules are caught up immediately on startup
+
+### Changed
+
+- When `recover_pending_jobs_on_startup` is set to `false`, `moxie serve` now discards persisted pending jobs on startup before transport recovery, retry loops, subagent watchers, or workflow watchers can continue them
+- When `run_overdue_schedules_on_startup` is set to `false`, missed in-process schedules are skipped on startup instead of firing immediately; one-shot schedules are dropped and recurring schedules advance to their next future run
+
 ## [0.4.0] - 2026-03-30
 
 ### Added

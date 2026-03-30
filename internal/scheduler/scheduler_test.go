@@ -394,6 +394,62 @@ func TestDueSortsAndSkipsRunningSchedules(t *testing.T) {
 	}
 }
 
+func TestSkipRemovesPastDueOneShotAndAdvancesRecurring(t *testing.T) {
+	restoreStore := jobstore.SetConfigDir(t.TempDir())
+	defer restoreStore()
+
+	store := testStore(t)
+	now := time.Date(2026, 3, 18, 10, 0, 0, 0, time.FixedZone("CDT", -5*60*60))
+
+	oneShot := Schedule{
+		ID:        "once",
+		Spec:      ScheduleSpec{Trigger: TriggerAt, At: now.Add(-2 * time.Hour)},
+		NextRun:   now.Add(-2 * time.Hour),
+		CreatedAt: now.Add(-3 * time.Hour),
+		Text:      "once",
+	}
+	recurring := Schedule{
+		ID: "cron",
+		Spec: ScheduleSpec{
+			Trigger: TriggerCalendar,
+			Calendar: &CalendarSpec{
+				Minute:     "0",
+				Hour:       "8",
+				DayOfMonth: "*",
+				Month:      "*",
+				DayOfWeek:  "1-5",
+				Cron:       "0 8 * * 1-5",
+			},
+		},
+		NextRun:   now.Add(-2 * time.Hour),
+		LastRun:   now.Add(-26 * time.Hour),
+		CreatedAt: now.Add(-7 * 24 * time.Hour),
+		Text:      "weekday morning",
+	}
+	if err := store.save([]Schedule{oneShot, recurring}); err != nil {
+		t.Fatalf("save schedules: %v", err)
+	}
+
+	if _, err := store.Skip("once", now); err != nil {
+		t.Fatalf("Skip(one-shot): %v", err)
+	}
+	if _, err := store.Get("once"); !os.IsNotExist(err) {
+		t.Fatalf("Get(once) err = %v, want os.ErrNotExist", err)
+	}
+
+	skipped, err := store.Skip("cron", now)
+	if err != nil {
+		t.Fatalf("Skip(recurring): %v", err)
+	}
+	wantNext := time.Date(2026, 3, 19, 8, 0, 0, 0, now.Location())
+	if !skipped.NextRun.Equal(wantNext) {
+		t.Fatalf("next run = %v, want %v", skipped.NextRun, wantNext)
+	}
+	if !skipped.LastRun.Equal(recurring.LastRun) {
+		t.Fatalf("last run = %v, want unchanged %v", skipped.LastRun, recurring.LastRun)
+	}
+}
+
 func TestDeleteAttachAndMarkDoneValidation(t *testing.T) {
 	restoreStore := jobstore.SetConfigDir(t.TempDir())
 	defer restoreStore()

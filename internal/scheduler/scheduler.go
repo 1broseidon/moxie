@@ -515,6 +515,54 @@ func (s *Store) MarkDone(id, jobID string, finishedAt time.Time) (Schedule, erro
 	return Schedule{}, os.ErrNotExist
 }
 
+func (s *Store) Skip(id string, skippedAt time.Time) (Schedule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	unlock, err := s.lockMutationFile()
+	if err != nil {
+		return Schedule{}, err
+	}
+	defer unlock()
+
+	schedules, err := s.load()
+	if err != nil {
+		return Schedule{}, err
+	}
+	if skippedAt.IsZero() {
+		skippedAt = time.Now().In(s.loc)
+	}
+	for i, sc := range schedules {
+		if sc.ID != id {
+			continue
+		}
+		if sc.RunningJobID != "" {
+			return Schedule{}, fmt.Errorf("schedule %s is running via job %s", id, sc.RunningJobID)
+		}
+		if sc.Spec.Trigger == TriggerAt {
+			next := append(schedules[:i:i], schedules[i+1:]...)
+			if err := s.backends.Remove(sc); err != nil {
+				return Schedule{}, err
+			}
+			if err := s.save(next); err != nil {
+				return Schedule{}, err
+			}
+			return sc, nil
+		}
+		nextRun, err := nextScheduleRun(sc, skippedAt, s.loc)
+		if err != nil {
+			return Schedule{}, err
+		}
+		sc.NextRun = nextRun
+		schedules[i] = sc
+		sortSchedules(schedules)
+		if err := s.save(schedules); err != nil {
+			return Schedule{}, err
+		}
+		return sc, nil
+	}
+	return Schedule{}, os.ErrNotExist
+}
+
 func (s *Store) Repair(jobExists func(string) bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

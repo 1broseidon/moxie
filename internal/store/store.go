@@ -29,6 +29,8 @@ type Config struct {
 	Channels                map[string]ChannelConfig `json:"channels,omitempty"`
 	Workspaces              map[string]string        `json:"workspaces,omitempty"`
 	DefaultCWD              string                   `json:"default_cwd,omitempty"`
+	RecoverPendingOnStartup *bool                    `json:"recover_pending_jobs_on_startup,omitempty"`
+	RunOverdueOnStartup     *bool                    `json:"run_overdue_schedules_on_startup,omitempty"`
 	SubagentMaxDepth        int                      `json:"subagent_max_depth,omitempty"`
 	SubagentMaxAttempts     int                      `json:"subagent_max_attempts,omitempty"`
 	SubagentStallTimeout    string                   `json:"subagent_stall_timeout,omitempty"`
@@ -54,6 +56,8 @@ type configFile struct {
 	Channels                map[string]ChannelConfig `json:"channels,omitempty"`
 	Workspaces              map[string]string        `json:"workspaces,omitempty"`
 	DefaultCWD              string                   `json:"default_cwd,omitempty"`
+	RecoverPendingOnStartup *bool                    `json:"recover_pending_jobs_on_startup,omitempty"`
+	RunOverdueOnStartup     *bool                    `json:"run_overdue_schedules_on_startup,omitempty"`
 	SubagentMaxDepth        int                      `json:"subagent_max_depth,omitempty"`
 	SubagentMaxAttempts     int                      `json:"subagent_max_attempts,omitempty"`
 	SubagentStallTimeout    string                   `json:"subagent_stall_timeout,omitempty"`
@@ -97,6 +101,8 @@ func LoadConfig() (Config, error) {
 		Channels:                file.Channels,
 		Workspaces:              file.Workspaces,
 		DefaultCWD:              file.DefaultCWD,
+		RecoverPendingOnStartup: file.RecoverPendingOnStartup,
+		RunOverdueOnStartup:     file.RunOverdueOnStartup,
 		SubagentMaxDepth:        file.SubagentMaxDepth,
 		SubagentMaxAttempts:     file.SubagentMaxAttempts,
 		SubagentStallTimeout:    file.SubagentStallTimeout,
@@ -184,6 +190,20 @@ func (cfg Config) MaxSubagentDepth() int {
 		return cfg.SubagentMaxDepth
 	}
 	return defaultSubagentMaxDepth
+}
+
+func (cfg Config) RecoverPendingJobsOnStartupEnabled() bool {
+	if cfg.RecoverPendingOnStartup != nil {
+		return *cfg.RecoverPendingOnStartup
+	}
+	return true
+}
+
+func (cfg Config) RunOverdueSchedulesOnStartupEnabled() bool {
+	if cfg.RunOverdueOnStartup != nil {
+		return *cfg.RunOverdueOnStartup
+	}
+	return true
 }
 
 func (cfg Config) MaxSubagentAttempts() int {

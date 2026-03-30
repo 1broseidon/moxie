@@ -547,6 +547,63 @@ func TestRecoverPendingJobsReplaysReadyJobAndAdvancesCursor(t *testing.T) {
 	}
 }
 
+func TestDiscardPendingJobsRemovesOnlyMatchingJobs(t *testing.T) {
+	useTempStoreDir(t)
+
+	store.WriteJob(store.PendingJob{ID: "job-tg", Status: "ready", Source: "telegram", ConversationID: "telegram:1"})
+	store.WriteJob(store.PendingJob{ID: "job-slack", Status: "running", Source: "slack", ConversationID: "slack:C1"})
+
+	discarded := dispatch.DiscardPendingJobs("discarded on startup", func(job store.PendingJob) bool {
+		return job.Source == "telegram"
+	})
+	if !discarded {
+		t.Fatal("expected DiscardPendingJobs to report discarded work")
+	}
+	if store.JobExists("job-tg") {
+		t.Fatal("expected matching job to be removed")
+	}
+	if !store.JobExists("job-slack") {
+		t.Fatal("expected non-matching job to remain")
+	}
+}
+
+func TestDiscardPendingJobsWritesBlockingFailureSentinel(t *testing.T) {
+	useTempStoreDir(t)
+
+	resultPath := filepath.Join(store.JobsDir(), "job-blocking.result")
+	store.WriteJob(store.PendingJob{
+		ID:                 "job-blocking",
+		Status:             "running",
+		Source:             "subagent",
+		ConversationID:     "telegram:1",
+		DelegatedTask:      "discard on startup",
+		BlockingResultPath: resultPath,
+		Updated:            time.Now(),
+		State:              store.State{Backend: "claude", ThreadID: "chat-1"},
+	})
+
+	if !dispatch.DiscardPendingJobs("subagent was discarded on startup because recover_pending_jobs_on_startup=false") {
+		t.Fatal("expected DiscardPendingJobs to report discarded work")
+	}
+	if store.JobExists("job-blocking") {
+		t.Fatal("expected blocking job to be removed")
+	}
+	data, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", resultPath, err)
+	}
+	for _, want := range []string{
+		"Blocking subagent failed before producing a normal result.",
+		"Backend: claude",
+		"Task: discard on startup",
+		"Reason: subagent was discarded on startup because recover_pending_jobs_on_startup=false",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("blocking discard failure = %q, want substring %q", string(data), want)
+		}
+	}
+}
+
 func TestRetryDeliverableJobsProcessesReadyAndRunningButNotDelivered(t *testing.T) {
 	useTempStoreDir(t)
 

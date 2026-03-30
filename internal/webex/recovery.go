@@ -24,6 +24,10 @@ func RecoverPendingJobs(api messenger, client *oneagent.Client, schedules *sched
 	}, isWebexJob)
 }
 
+func DiscardPendingJobs(reason string) bool {
+	return dispatch.DiscardPendingJobs(reason, isWebexJob)
+}
+
 func RetryDeliverableJobs(api messenger, client *oneagent.Client, schedules *scheduler.Store) bool {
 	return dispatch.RetryDeliverableJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		return webexDispatchCallbacks(api, job)

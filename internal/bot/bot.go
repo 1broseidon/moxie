@@ -617,6 +617,15 @@ func RecoverPendingJobs(bot sender, client *oneagent.Client, schedules *schedule
 	return recovered
 }
 
+func DiscardPendingJobs(reason string) bool {
+	maxRecovered := maxTelegramSourceEventID(store.ListJobs())
+	discarded := dispatch.DiscardPendingJobs(reason, isTelegramJob)
+	if maxRecovered > ReadCursor() {
+		WriteCursor(maxRecovered)
+	}
+	return discarded
+}
+
 func RetryDeliverableJobs(bot sender, client *oneagent.Client, schedules *scheduler.Store) bool {
 	return dispatch.RetryDeliverableJobs(client, schedules, func(job *store.PendingJob) dispatch.Callbacks {
 		stopTyping := newTypingStopper(bot, conversationFromID(job.ConversationID), job.Status != "ready" && job.Status != "delivered")

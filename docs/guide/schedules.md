@@ -52,6 +52,8 @@ Schedules use the system local timezone by default. `--every` uses elapsed-time 
 
 On Linux, you must keep `moxie serve` running if you want schedules to keep firing.
 
+By default, when Moxie starts again after downtime, overdue Linux fallback schedules run immediately. If you want restart to skip missed executions instead of catching up, set `run_overdue_schedules_on_startup` to `false` in `~/.config/moxie/config.json`.
+
 On Windows, native schedules currently register with the current interactive user token, so supported Task Scheduler schedules run while that user is signed in. Unsupported schedules still fall back to the in-process scheduler and therefore still depend on `moxie serve`.
 
 Use `moxie schedule show <id>` to inspect sync details. When relevant, it shows fields such as `Managed by`, `Sync state`, and `Sync error` so you can tell whether a schedule is native or running via fallback.

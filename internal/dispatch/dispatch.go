@@ -510,6 +510,42 @@ func RecoverPendingJobs(client *oneagent.Client, schedules *scheduler.Store, cal
 	return recovered
 }
 
+func DiscardPendingJobs(reason string, filters ...func(store.PendingJob) bool) bool {
+	storedJobs := store.ListJobs()
+	if len(storedJobs) == 0 {
+		return false
+	}
+	var filter func(store.PendingJob) bool
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
+	matchCount := 0
+	for _, storedJob := range storedJobs {
+		if filter == nil || filter(storedJob) {
+			matchCount++
+		}
+	}
+	if matchCount == 0 {
+		return false
+	}
+	log.Printf("discarding %d persisted pending job(s)", matchCount)
+	discarded := false
+	for _, storedJob := range storedJobs {
+		if filter != nil && !filter(storedJob) {
+			continue
+		}
+		discarded = true
+		job := storedJob
+		log.Printf("discarding pending job %s (%s)", job.ID, job.Status)
+		if finalizeBlockingSubagentFailure(&job, reason) {
+			continue
+		}
+		store.CleanupJobTemp(job)
+		store.RemoveJob(job.ID)
+	}
+	return discarded
+}
+
 func isRetryable(job store.PendingJob) bool {
 	// "delivered" jobs are NOT retried here — they are finalized at startup
 	// via RecoverPendingJobs. Including them caused infinite retry loops
