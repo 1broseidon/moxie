@@ -54,7 +54,15 @@ func RunModelStreamContext(ctx context.Context, job *store.PendingJob, client *o
 }
 
 func isSupervisedSubagentJob(job *store.PendingJob, client *oneagent.Client) bool {
-	return client != nil && job != nil && job.Source == "subagent"
+	if client == nil || job == nil {
+		return false
+	}
+	switch job.Source {
+	case "subagent", "workflow-step", "workflow-merge":
+		return true
+	default:
+		return false
+	}
 }
 
 func runSupervisedSubagent(job *store.PendingJob, client *oneagent.Client, onActivity func(string)) (string, bool) {

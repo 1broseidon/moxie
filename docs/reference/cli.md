@@ -99,6 +99,31 @@ moxie subagent cancel <job-id>  # Cancel a running job
 
 `moxie subagent list` shows active subagent jobs by default. Use `--all` to include completed and canceled jobs. `moxie subagent show` displays full job details including status, backend, model, thread, depth, attempt, run ID, and timestamps.
 
+### `moxie workflow`
+
+Run and manage bounded parallel workflows. The shipped MVP supports the `fanout` strategy, which launches the worker specs listed in `--workers` in parallel and runs one merge step to combine their results.
+
+**Workflows are quiet by default.** No progress updates or intermediate worker output are delivered during a run. Only the final merged result is sent. Use `moxie workflow watch` to observe live output.
+
+```bash
+moxie workflow run fanout --workers <backend[:model][,backend[:model]...]> --merge <backend[:model]> --text <task>
+moxie workflow list                     # List active workflows (use --all to include terminal workflows)
+moxie workflow show <workflow-id>       # Show full details (status, workers, merge job)
+moxie workflow watch <workflow-id>      # Stream workflow events until completion
+moxie workflow cancel <workflow-id>     # Mark the workflow and child jobs canceled
+```
+
+#### `workflow run fanout` flags
+
+| Flag | Description |
+|------|-------------|
+| `--workers` | Required. Comma-separated worker specs in `backend[:model]` form |
+| `--merge` | Required. Merge-step agent in `backend[:model]` form |
+| `--text` | Required. Task prompt sent to the workflow |
+| `--notify` | Optional notification mode. Defaults to `silent` |
+
+Use `fanout` for independent parallel subtasks where a single merge step can combine the outputs. `moxie workflow cancel` marks the workflow and child jobs as canceled; it does not promise to interrupt an already-running worker process immediately. For sequential or interdependent work, use `moxie subagent` instead.
+
 ### `moxie result`
 
 Retrieve subagent results.

@@ -408,6 +408,36 @@ moxie subagent --backend codex --text "Write tests for internal/auth"
 
 The primary agent can also delegate via the `moxie subagent` CLI tool during a conversation. Results are synthesized back into the parent conversation thread.
 
+## Workflows
+
+Workflows let Moxie coordinate bounded parallel work across multiple independent workers and merge the results in a single final step. The shipped MVP exposes the `fanout` strategy.
+
+```bash
+# Launch a fanout workflow: the listed worker backends/models run in parallel, then one merge step combines results
+moxie workflow run fanout \
+  --workers codex,claude:sonnet,pi:openai-codex/gpt-5.4 \
+  --merge claude:sonnet \
+  --text "Audit all API handlers for missing auth"
+
+# List active and recent workflows
+moxie workflow list
+
+# Show full details for a workflow (status, worker jobs, merge job)
+moxie workflow show <workflow-id>
+
+# Stream live log output until the workflow finishes
+moxie workflow watch <workflow-id>
+
+# Cancel a running workflow (marks the workflow and child jobs canceled)
+moxie workflow cancel <workflow-id>
+```
+
+**Workflows are quiet by default.** Moxie does not emit progress updates or intermediate worker output during a run. Only the final merged result is delivered. Use `moxie workflow watch` if you want to observe live output.
+
+`moxie workflow cancel` marks the workflow and its child jobs as canceled. It does not promise to interrupt an already-running worker process immediately.
+
+Use `moxie workflow run fanout` for bounded parallel work where subtasks are independent and a single merge step can combine the results. For sequential or interdependent tasks, use `moxie subagent` instead.
+
 ## CLI reference
 
 ```
@@ -417,6 +447,8 @@ moxie messages [--json|--raw] [-n N]                List recent messages
 moxie msg                                           Alias for messages
 moxie schedule <add|list|show|rm>                   Manage schedules
 moxie subagent --backend <name> --text <task>       Delegate to a background agent
+moxie workflow run fanout [flags]                   Run a bounded parallel fanout workflow
+moxie workflow <list|show|watch|cancel>             Manage workflows (quiet by default; watch for live output)
 moxie result <subcommand>                           Retrieve subagent results
 moxie threads show <id>                             Show thread turns
 moxie service <subcommand>                          Install or control the background service

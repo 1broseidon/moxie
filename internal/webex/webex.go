@@ -370,6 +370,15 @@ func senderName(personEmail string) string {
 	return personEmail
 }
 
+func isAudioFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".oga", ".ogg", ".mp3", ".wav", ".m4a", ".flac", ".webm", ".aac", ".opus":
+		return true
+	}
+	return false
+}
+
 func previewText(text string) string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
 	runes := []rune(text)
@@ -499,7 +508,11 @@ func (a *Adapter) handleMessage(msg Message) {
 			log.Printf("webex file download failed: %v", err)
 		} else {
 			tempPath = path
-			promptText = prompt.FormatMediaPrompt("a file", path, text, "User sent a file")
+			if isAudioFile(tempPath) {
+				promptText = prompt.FormatAudioPrompt("a voice message", path, text, "User sent a voice message")
+			} else {
+				promptText = prompt.FormatMediaPrompt("a file", path, text, "User sent a file")
+			}
 		}
 	}
 

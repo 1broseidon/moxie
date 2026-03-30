@@ -2,6 +2,22 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.4.0] - 2026-03-30
+
+### Added
+
+- **`moxie workflow run fanout`** — bounded parallel execution across multiple independent worker subagents, with a final merge step that combines all results into a single synthesized reply; designed for tasks where subtasks are fully independent and can be parallelised safely
+- **`moxie workflow list`**, **`show`**, **`watch`**, and **`cancel`** subcommands for inspecting and managing active workflows
+- Slack `<send>` file upload support, using Slack's external upload flow to attach local files back into the conversation
+- Audio and voice attachment prompts now include detected format/duration metadata and any available Whisper transcription tool/model hints
+
+### Changed
+
+- Workflows are **quiet by default** — no intermediate status messages are emitted during worker execution; results are delivered only on final completion (or failure), keeping the conversation clean for long-running fanouts
+- Agent system prompt now shares a common Moxie core across transports, with explicit guidance for `moxie workflow`: use fanout only for bounded parallel work with independent subtasks and a single merge step; do not nest workflows; treat workflows as an internal implementation detail unless the user explicitly asks about workflow mechanics
+- Telegram command registration and shared command hints now come from one command list, so `/think` appears consistently in command menus and help text
+- `moxie serve` now starts all configured transports in one process and warms Whisper detection on startup for faster first voice-message handling
+
 ## [0.3.3] - 2026-03-29
 
 ### Added

@@ -1,19 +1,54 @@
 package prompt
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/1broseidon/oneagent"
 )
 
-func TestFormatMediaPrompt(t *testing.T) {
-	got := FormatMediaPrompt("a photo", "/tmp/photo.jpg", "caption here", "fallback")
-	want := "User sent a photo: /tmp/photo.jpg\nCaption: caption here"
-	if got != want {
-		t.Fatalf("FormatMediaPrompt() = %q, want %q", got, want)
+func TestCoreSystemPromptWorkflowGuidance(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "capabilities include workflow", want: "moxie schedule, moxie subagent, moxie workflow, moxie result, and moxie service"},
+		{name: "subagent remains default", want: "Use moxie subagent by default when delegating work to another backend."},
+		{name: "fanout is narrow exception", want: "Use moxie workflow run fanout only for bounded parallel work"},
+		{name: "workflows are internal detail", want: "Treat workflows as an internal implementation detail unless the user explicitly asks about workflow behavior."},
+		{name: "no polling by default", want: "do not poll status, watch logs, or inspect progress unless the user asks or the run fails and needs intervention"},
+		{name: "quiet execution", want: "Prefer quiet background execution: acknowledge launch briefly, then wait for the final result."},
+		{name: "no interdependent fanout", want: "Do not use fanout for sequential or interdependent subtasks."},
+		{name: "no nesting", want: "Do not nest workflows."},
 	}
 
-	got = FormatMediaPrompt("a file", "/tmp/doc.pdf", "", "User sent a file")
-	want = "User sent a file: /tmp/doc.pdf\nRequest: User sent a file"
-	if got != want {
-		t.Fatalf("FormatMediaPrompt() fallback = %q, want %q", got, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(CoreSystemPrompt, tt.want) {
+				t.Fatalf("CoreSystemPrompt missing %q", tt.want)
+			}
+		})
+	}
+}
+
+func TestApplySystemPromptsInjectsWorkflowGuidance(t *testing.T) {
+	backends := map[string]oneagent.Backend{
+		"claude": {SystemPrompt: "base"},
+		"pi":     {},
+	}
+
+	ApplySystemPrompts(backends, "transport")
+
+	for name, backend := range backends {
+		for _, want := range []string{
+			"moxie workflow",
+			"Use moxie subagent by default",
+			"Use moxie workflow run fanout only for bounded parallel work",
+			"Do not nest workflows.",
+		} {
+			if !strings.Contains(backend.SystemPrompt, want) {
+				t.Fatalf("backend %s missing %q in system prompt: %q", name, want, backend.SystemPrompt)
+			}
+		}
 	}
 }

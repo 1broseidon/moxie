@@ -48,6 +48,21 @@ moxie result show <id>         # Show a specific result artifact
 moxie result search <query>    # Search artifacts by task text
 ```
 
+## Bounded parallel work with workflows
+
+For tasks that can be split across multiple independent workers — research sweeps, repo audits, alternative proposals — use `moxie workflow run fanout` instead of multiple subagents. Workflows are **quiet by default**: Moxie sends one acknowledgement when the workflow starts and delivers the merged result when all workers finish. It does not stream per-worker progress into chat unless you request it.
+
+```bash
+moxie workflow run fanout \
+  --workers claude,claude,pi \
+  --merge claude \
+  --text "Audit the scheduler and summarize findings"
+```
+
+See `moxie workflow --help` and the [CLI reference](../reference/cli.md) for `list`, `show`, `watch`, and `cancel` commands.
+
+Use subagents (not workflows) when the task is sequential or when one result must inform the next step. Use workflows only for bounded parallel work where a merge step can combine independent outputs.
+
 ## Sequential tasks
 
 When you ask Moxie to do multiple tasks sequentially (e.g. "do A then B then C"), the synthesis step automatically dispatches the next task after each one completes. The loop continues until all tasks are done or one needs human attention.

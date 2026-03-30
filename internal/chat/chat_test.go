@@ -68,6 +68,29 @@ func TestHandleInboundBuildsImmediateCommandReply(t *testing.T) {
 	}
 }
 
+func TestHandleInboundUnknownCommandListsThink(t *testing.T) {
+	useTempConfigDir(t)
+
+	got := HandleInbound(
+		InboundMessage{
+			Source:       "telegram",
+			Conversation: ConversationRef{Provider: ProviderTelegram, ChannelID: "412407481"},
+			Text:         "/bogus",
+		},
+		Settings{Workspaces: map[string]string{}},
+		"",
+		store.State{Backend: "claude"},
+		&oneagent.Client{},
+	)
+	if got.Job != nil {
+		t.Fatal("expected no job for unknown command")
+	}
+	want := "Unknown command. Try /new, /model, /think, /cwd, /threads, or /compact."
+	if got.ImmediateReply != want {
+		t.Fatalf("ImmediateReply = %q, want %q", got.ImmediateReply, want)
+	}
+}
+
 func TestHandleInboundCommandsAreScopedPerConversation(t *testing.T) {
 	useTempConfigDir(t)
 

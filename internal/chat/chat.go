@@ -73,6 +73,47 @@ type Settings struct {
 	SaveWorkspaces func(map[string]string)
 }
 
+type CommandInfo struct {
+	Name        string
+	Description string
+}
+
+var supportedCommands = []CommandInfo{
+	{Name: "new", Description: "New thread (/new [backend] [workspace])"},
+	{Name: "model", Description: "Show or switch backend/model"},
+	{Name: "think", Description: "Show or set thinking level"},
+	{Name: "cwd", Description: "Show, switch, or save workspace"},
+	{Name: "threads", Description: "List or switch threads"},
+	{Name: "compact", Description: "Compact current thread history"},
+}
+
+func SupportedCommands() []CommandInfo {
+	out := make([]CommandInfo, len(supportedCommands))
+	copy(out, supportedCommands)
+	return out
+}
+
+func SupportedCommandsHint() string {
+	return SupportedCommandsHintWithPrefix("/")
+}
+
+func SupportedCommandsHintWithPrefix(prefix string) string {
+	names := make([]string, 0, len(supportedCommands))
+	for _, cmd := range supportedCommands {
+		names = append(names, prefix+cmd.Name)
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " or " + names[1]
+	default:
+		return strings.Join(names[:len(names)-1], ", ") + ", or " + names[len(names)-1]
+	}
+}
+
 type HandleResult struct {
 	ImmediateReply string
 	Job            *store.PendingJob
@@ -83,7 +124,7 @@ func HandleInbound(msg InboundMessage, cfg Settings, defaultCWD string, st store
 	if strings.HasPrefix(text, "/") {
 		base, _ := parseCommand(text)
 		if !isSupportedCommand(base) {
-			return HandleResult{ImmediateReply: "Unknown command. Try /new, /model, /cwd, /threads, or /compact."}
+			return HandleResult{ImmediateReply: "Unknown command. Try " + SupportedCommandsHint() + "."}
 		}
 		return HandleResult{ImmediateReply: HandleCommand(msg.Conversation.ID(), text, client, cfg, defaultCWD)}
 	}
@@ -161,12 +202,12 @@ func parseCommand(text string) (base, arg string) {
 }
 
 func isSupportedCommand(name string) bool {
-	switch name {
-	case "new", "model", "think", "cwd", "threads", "compact":
-		return true
-	default:
-		return false
+	for _, cmd := range supportedCommands {
+		if cmd.Name == name {
+			return true
+		}
 	}
+	return false
 }
 
 func handleNew(conversationID, arg string, st store.State, client *oneagent.Client, cfg Settings, defaultCWD string) string {

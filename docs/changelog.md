@@ -2,6 +2,147 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.4.0] - 2026-03-30
+
+### Added
+
+- **`moxie workflow run fanout`** — bounded parallel execution across multiple independent worker subagents, with a final merge step that combines all results into a single synthesized reply; designed for tasks where subtasks are fully independent and can be parallelised safely
+- **`moxie workflow list`**, **`show`**, **`watch`**, and **`cancel`** subcommands for inspecting and managing active workflows
+- Slack `<send>` file upload support, using Slack's external upload flow to attach local files back into the conversation
+- Audio and voice attachment prompts now include detected format/duration metadata and any available Whisper transcription tool/model hints
+
+### Changed
+
+- Workflows are **quiet by default** — no intermediate status messages are emitted during worker execution; results are delivered only on final completion (or failure), keeping the conversation clean for long-running fanouts
+- Agent system prompt now shares a common Moxie core across transports, with explicit guidance for `moxie workflow`: use fanout only for bounded parallel work with independent subtasks and a single merge step; do not nest workflows; treat workflows as an internal implementation detail unless the user explicitly asks about workflow mechanics
+- Telegram command registration and shared command hints now come from one command list, so `/think` appears consistently in command menus and help text
+- `moxie serve` now starts all configured transports in one process and warms Whisper detection on startup for faster first voice-message handling
+
+## [0.3.3] - 2026-03-29
+
+### Added
+
+- Preflight backend check before subagent dispatch — fails fast with an actionable error when the target backend CLI is missing or unhealthy, instead of silently retrying a doomed job three times
+- Preflight check inside `processJob` so jobs entering through any path (chat, schedules, recovery) also fail fast; error is delivered to the user as a normal message
+- Resource limits to prevent runaway fan-out and schedule abuse, all configurable via `config.json`:
+  - `max_pending_subagents` (default 5) — max concurrent subagent jobs per conversation
+  - `max_schedules_per_conv` (default 20) — max schedules per conversation
+  - `max_jobs_per_minute` (default 10) — rate limit on `moxie send` and subagent dispatch
+  - `max_schedule_generation` (default 3) — caps schedule→dispatch→schedule recursion cycles
+- Default backend auto-detected at startup from installed CLIs — checks in preferred order (claude → pi → codex → opencode → gemini → any installed), logs the resolved default; no longer silently defaults to `claude` on systems where it is not installed
+
+### Fixed
+
+- Exec schedule job failures are now delivered to the user as a warning message (`⚠️ Scheduled task failed: …`) instead of silently removing the job with no notification
+- System prompt now tells the agent not to poll subagent status after dispatch — results arrive automatically via synthesis, eliminating unnecessary `moxie subagent list/show` calls
+- Available backends in the system prompt are now filtered to CLIs actually installed on the system — prevents the agent from attempting to delegate to backends that will fail preflight
+- Synthesis prompt now instructs the agent to summarize the result with key findings and outcomes rather than just replying "done"
+- Delivery logging hardened — `SendChunked` logs message IDs, chunk counts, and returns an error when nothing is delivered; `DeliverJobResult` logs job ID, conversation, result length, and file count
+
+## [0.3.2] - 2026-03-25
+
+### Fixed
+
+- Block subagent chaining from synthesis turns — prevents runaway loops where a synthesis turn spawns another subagent
+
+## [0.3.1] - 2026-03-24
+
+### Added
+
+- Webex file upload — agents can send files back via `<send>` tags using multipart upload
+- Webex file download — inbound attachments are downloaded with Bearer auth and passed to the agent
+- Live activity updates for Webex — status messages are edited in-place via `PUT /messages/{id}`, matching the Telegram experience
+- Verb-aware activity rendering for Webex (Reading files, Running command, Searching)
+
+## [0.3.0] - 2026-03-24
+
+### Added
+
+- Webex transport for 1:1 direct messages — `moxie serve --transport webex`
+- Per-sender ACLs via `allowed_user_ids` and `allowed_emails`
+- Bot ID auto-discovery from Webex token
+- Webex schedule, subagent, and result delivery support
+- Room activity filtering to minimize API polling overhead
+- Room type caching to avoid redundant GetRoom calls
+
+## [0.2.9] - 2026-03-24
+
+### Changed
+
+- `/think` now passes through any value to the backend instead of validating against a hardcoded list — backends report invalid levels, allowing agents to self-heal
+- Bump oneagent to v0.11.13 (improved error handling, backend-side thinking validation)
+
+### Fixed
+
+- `moxie service install` now captures the user's actual PATH at install time instead of a hardcoded fallback — fixes backends like `pi` not being found when running as a service
+- `moxie service install` and `moxie service start/stop/restart` now detect missing systemd user sessions and suggest `sudo loginctl enable-linger <user>` instead of showing opaque "exit status 1" or "No medium found" errors
+
+## [0.2.8] - 2026-03-24
+
+### Fixed
+
+- Subagent jobs now dispatch in parallel — previously ran sequentially, causing jobs to appear dropped when multiple subagents were dispatched simultaneously
+- In-flight tracking prevents ticker from re-dispatching jobs already being processed
+- Stop retrying delivered jobs in the hot loop — removed "delivered" from retry predicate to fix zombie retry loops (observed running for 2.5+ hours)
+- Replace PID-based serve lock with flock for race-free mutual exclusion (fixes TOCTOU race on PID recycling)
+- Robust PATH propagation for launchd schedule plists — detects minimal PATH and falls back to reading from the main service plist
+
+## [0.2.7] - 2026-03-23
+
+### Fixed
+
+- Exec schedule jobs now use `bash -l` instead of `sh`, loading login profile PATH so tools like `claude` and `gog` are found on macOS
+
+## [0.2.6] - 2026-03-23
+
+### Added
+
+- Exec schedule action (`--action exec`) for command-based notifications — runs a shell command and delivers stdout to the conversation, staying silent when the script produces no output
+- Platform and shell detection injected into agent system prompt for OS-appropriate script generation
+
+## [0.2.5] - 2026-03-23
+
+### Fixed
+
+- Orphaned delivered schedule jobs are now dropped instead of retrying forever when their schedule has been removed
+- Cross-process file lock (`flock`) for schedule store mutations prevents concurrent write corruption between `moxie serve` and `moxie schedule fire`
+- macOS serve CWD resolution prefers logical `$PWD` over physical path to avoid `/private/var` symlink confusion
+
+## [0.2.4] - 2026-03-23
+
+### Changed
+
+- System prompts now mention `moxie service` and warn against running `moxie serve` directly to prevent duplicate processes
+
+### Fixed
+
+- macOS launchd one-shot cleanup: `launchctl bootout` failure no longer prevents plist removal and schedule store cleanup when the fire process is the launchd job itself
+
+## [0.2.3] - 2026-03-23
+
+### Changed
+
+- Synthesis prompt rewritten for natural conversation flow instead of formal report-style responses
+- Documented `moxie subagent list/show/cancel` commands and sequential task continuation in guide and CLI reference
+
+### Fixed
+
+- macOS launchd one-shot schedules: `--in` durations now round up to next whole minute instead of falling back to in-process
+- `schedule rm` no longer blocked by stale `RunningJobID` when the referenced job no longer exists
+- Schedule store writes are now atomic (temp file + rename) to prevent JSON corruption from concurrent writers
+- Schedule store reads fall back to `.bak` copy when primary JSON is corrupt
+
+## [0.2.2] - 2026-03-23
+
+### Changed
+
+- Synthesis continuation loop hardened per code review: model now passed through to synthesis prompt, continuation trigger tightened to require explicit sequential requests, result marked as untrusted to mitigate prompt injection
+
+### Fixed
+
+- Duplicate thread messages caused by concurrent writers (synthesis and main conversation) — bumped oneagent to v0.11.12 with turn-level dedup
+- Added pidfile guard to `moxie serve` to prevent duplicate instances from running simultaneously
+
 ## [0.2.1] - 2026-03-22
 
 ### Added

@@ -9,6 +9,10 @@ import (
 )
 
 func slackDispatchCallbacks(api messenger, job *store.PendingJob) dispatch.Callbacks {
+	return slackDispatchCallbacksWithUploader(api, nil, job)
+}
+
+func slackDispatchCallbacksWithUploader(api messenger, uploader fileUploader, job *store.PendingJob) dispatch.Callbacks {
 	status := newRunningStatus(api, job)
 	var once sync.Once
 	stopInitial := func() {}
@@ -40,7 +44,7 @@ func slackDispatchCallbacks(api messenger, job *store.PendingJob) dispatch.Callb
 		OnResult: func(result string) error {
 			stopInitial()
 			job.Result = result
-			return DeliverJobResult(api, job)
+			return DeliverJobResultWithFiles(api, uploader, job)
 		},
 		OnStatusClear: func() {
 			stopInitial()

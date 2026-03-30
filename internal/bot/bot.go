@@ -224,16 +224,20 @@ func (s *runningStatus) clear() {
 }
 
 func RegisterCommands(bot sender) {
-	cmds := []struct {
+	type telegramCommand struct {
 		Command     string `json:"command"`
 		Description string `json:"description"`
-	}{
-		{"new", "New thread (/new [backend] [workspace])"},
-		{"model", "Show or switch model/backend"},
-		{"cwd", "Show, switch, or save workspace"},
-		{"threads", "List saved threads"},
-		{"compact", "Summarize old thread turns"},
 	}
+
+	commands := chat.SupportedCommands()
+	cmds := make([]telegramCommand, 0, len(commands))
+	for _, cmd := range commands {
+		cmds = append(cmds, telegramCommand{
+			Command:     cmd.Name,
+			Description: cmd.Description,
+		})
+	}
+
 	data, err := json.Marshal(map[string]any{"commands": cmds})
 	store.Check(err)
 	if _, err := bot.Raw("setMyCommands", json.RawMessage(data)); err != nil {
@@ -362,6 +366,8 @@ func BuildInboundPrompt(bot fileSender, m *tb.Message) (string, string, error) {
 		return "", "", nil
 	}
 
+	isVoice := m.Voice != nil
+
 	path, err := SaveTelegramFile(bot, file, origName, base, ext)
 	if err != nil {
 		return "", "", err
@@ -369,6 +375,9 @@ func BuildInboundPrompt(bot fileSender, m *tb.Message) (string, string, error) {
 	if origName != "" {
 		kind = "a file (" + origName + ")"
 		fallback = "User sent file: " + origName
+	}
+	if isVoice {
+		return prompt.FormatAudioPrompt(kind, path, m.Caption, fallback), path, nil
 	}
 	return prompt.FormatMediaPrompt(kind, path, m.Caption, fallback), path, nil
 }

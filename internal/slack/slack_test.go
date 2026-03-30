@@ -147,3 +147,12 @@ func TestHandleSlashCommandRespondsEphemerally(t *testing.T) {
 		t.Fatal("expected slash command response text")
 	}
 }
+
+func TestHandleEmptySlashCommandListsThink(t *testing.T) {
+	payload := (&Adapter{}).slashCommandPayload(slack.SlashCommand{})
+	text, _ := payload["text"].(string)
+	want := "Try `" + chat.SupportedCommandsHintWithPrefix("/moxie ") + "`."
+	if text != want {
+		t.Fatalf("text = %q, want %q", text, want)
+	}
+}

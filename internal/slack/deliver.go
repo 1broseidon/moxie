@@ -1,8 +1,10 @@
 package slack
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -23,6 +25,14 @@ type messenger interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (string, string, error)
 	UpdateMessage(channelID, timestamp string, options ...slack.MsgOption) (string, string, string, error)
 	DeleteMessage(channel, messageTimestamp string) (string, string, error)
+}
+
+// fileUploader is implemented by *slack.Client and allows uploading files
+// via the files.getUploadURLExternal → upload → files.completeUploadExternal flow.
+type fileUploader interface {
+	GetUploadURLExternalContext(ctx context.Context, params slack.GetUploadURLExternalParameters) (*slack.GetUploadURLExternalResponse, error)
+	UploadToURL(ctx context.Context, params slack.UploadToURLParameters) error
+	CompleteUploadExternalContext(ctx context.Context, params slack.CompleteUploadExternalParameters) (*slack.CompleteUploadExternalResponse, error)
 }
 
 type Messenger = messenger
@@ -199,15 +209,81 @@ func splitResponseFiles(text string) ([]string, string) {
 	return paths, cleaned
 }
 
-func fileUploadNotice(paths []string) string {
-	if len(paths) == 0 {
-		return ""
+// uploadFile uploads a local file to a Slack channel using the external upload flow.
+// It returns nil on success or an error if any step fails.
+func uploadFile(uploader fileUploader, channelID, threadTS, filePath string) error {
+	filePath = strings.TrimSpace(filePath)
+	if filePath == "" {
+		return fmt.Errorf("empty file path")
 	}
-	names := make([]string, 0, len(paths))
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", filePath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", filePath)
+	}
+
+	ctx := context.Background()
+	fileName := filepath.Base(filePath)
+
+	// Step 1: Get upload URL
+	urlResp, err := uploader.GetUploadURLExternalContext(ctx, slack.GetUploadURLExternalParameters{
+		FileName: fileName,
+		FileSize: int(info.Size()),
+	})
+	if err != nil {
+		return fmt.Errorf("get upload URL for %s: %w", fileName, err)
+	}
+
+	// Step 2: Upload file content
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", filePath, err)
+	}
+	defer f.Close()
+
+	if err := uploader.UploadToURL(ctx, slack.UploadToURLParameters{
+		UploadURL: urlResp.UploadURL,
+		Reader:    f,
+		Filename:  fileName,
+	}); err != nil {
+		return fmt.Errorf("upload %s: %w", fileName, err)
+	}
+
+	// Step 3: Complete upload and share to channel
+	completeParams := slack.CompleteUploadExternalParameters{
+		Files: []slack.FileSummary{
+			{ID: urlResp.FileID, Title: fileName},
+		},
+		Channel: channelID,
+	}
+	if threadTS != "" {
+		completeParams.ThreadTimestamp = threadTS
+	}
+	if _, err := uploader.CompleteUploadExternalContext(ctx, completeParams); err != nil {
+		return fmt.Errorf("complete upload for %s: %w", fileName, err)
+	}
+
+	return nil
+}
+
+// sendTaggedFiles uploads files extracted from <send> tags to Slack.
+// Returns the list of filenames that failed to upload.
+func sendTaggedFiles(uploader fileUploader, conversation chat.ConversationRef, paths []string) []string {
+	var failed []string
 	for _, path := range paths {
-		names = append(names, filepath.Base(path))
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if err := uploadFile(uploader, conversation.ChannelID, conversation.ThreadID, path); err != nil {
+			log.Printf("slack file upload error for %s: %v", filepath.Base(path), err)
+			failed = append(failed, filepath.Base(path))
+		}
 	}
-	return fmt.Sprintf("File delivery is not supported on Slack yet: %s", strings.Join(names, ", "))
+	return failed
 }
 
 func replyConversationForJob(job *store.PendingJob, st jobState) chat.ConversationRef {
@@ -232,15 +308,16 @@ func emptyResultMessage(backend string) string {
 }
 
 func DeliverJobResult(api messenger, job *store.PendingJob) error {
+	return deliverJobResult(api, nil, job)
+}
+
+// DeliverJobResultWithFiles delivers a job result with file upload support.
+func DeliverJobResultWithFiles(api messenger, uploader fileUploader, job *store.PendingJob) error {
+	return deliverJobResult(api, uploader, job)
+}
+
+func deliverJobResult(api messenger, uploader fileUploader, job *store.PendingJob) error {
 	paths, text := splitResponseFiles(job.Result)
-	notice := fileUploadNotice(paths)
-	if notice != "" {
-		if text != "" {
-			text += "\n\n" + notice
-		} else {
-			text = notice
-		}
-	}
 	if text == "" && len(paths) == 0 {
 		text = emptyResultMessage(job.State.Backend)
 	}
@@ -248,7 +325,22 @@ func DeliverJobResult(api messenger, job *store.PendingJob) error {
 	if target.Provider != chat.ProviderSlack || target.ChannelID == "" {
 		return fmt.Errorf("unsupported slack conversation: %+v", target)
 	}
-	return SendPlainText(api, target, text)
+	if err := SendPlainText(api, target, text); err != nil {
+		return err
+	}
+	if len(paths) > 0 && uploader != nil {
+		if failed := sendTaggedFiles(uploader, target, paths); len(failed) > 0 {
+			log.Printf("slack file upload failed for: %s", strings.Join(failed, ", "))
+		}
+	} else if len(paths) > 0 {
+		// No uploader available — log a warning
+		names := make([]string, 0, len(paths))
+		for _, p := range paths {
+			names = append(names, filepath.Base(p))
+		}
+		log.Printf("slack file upload skipped (no uploader): %s", strings.Join(names, ", "))
+	}
+	return nil
 }
 
 func SendImmediate(api messenger, conversation chat.ConversationRef, text string) (string, bool) {
@@ -282,4 +374,8 @@ func SendImmediate(api messenger, conversation chat.ConversationRef, text string
 
 func ProcessJob(job store.PendingJob, api messenger, client *oneagent.Client, schedules *scheduler.Store) {
 	dispatch.ProcessJob(&job, client, schedules, slackDispatchCallbacks(api, &job))
+}
+
+func ProcessJobWithUploader(job store.PendingJob, api messenger, uploader fileUploader, client *oneagent.Client, schedules *scheduler.Store) {
+	dispatch.ProcessJob(&job, client, schedules, slackDispatchCallbacksWithUploader(api, uploader, &job))
 }

@@ -1,10 +1,12 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -83,17 +85,77 @@ func TestDeliverJobResultUsesStoredReplyThreadAndStripsSendTags(t *testing.T) {
 		ReplyConversation: chat.ConversationRef{Provider: chat.ProviderSlack, ChannelID: "C123", ThreadID: "1700.2"},
 	})
 
+	// DeliverJobResult without uploader — files logged as skipped, text delivered without send tags
 	if err := DeliverJobResult(client, job); err != nil {
 		t.Fatalf("DeliverJobResult(): %v", err)
 	}
 	if got := form.Get("thread_ts"); got != "1700.2" {
 		t.Fatalf("thread_ts = %q, want 1700.2", got)
 	}
-	if got := form.Get("text"); !strings.Contains(got, "File delivery is not supported on Slack yet: report.txt") {
-		t.Fatalf("text = %q, missing file notice", got)
+	if got := form.Get("text"); got != "done" {
+		t.Fatalf("text = %q, want 'done' (send tags stripped)", got)
 	}
 	if strings.Contains(form.Get("text"), "<send>") {
 		t.Fatalf("text leaked send tag: %q", form.Get("text"))
+	}
+}
+
+type fakeFileUploader struct {
+	uploaded []string
+}
+
+func (f *fakeFileUploader) GetUploadURLExternalContext(_ context.Context, params goslack.GetUploadURLExternalParameters) (*goslack.GetUploadURLExternalResponse, error) {
+	return &goslack.GetUploadURLExternalResponse{
+		UploadURL: "https://fake-upload-url.example.com",
+		FileID:    "F123",
+	}, nil
+}
+
+func (f *fakeFileUploader) UploadToURL(_ context.Context, params goslack.UploadToURLParameters) error {
+	f.uploaded = append(f.uploaded, params.Filename)
+	return nil
+}
+
+func (f *fakeFileUploader) CompleteUploadExternalContext(_ context.Context, params goslack.CompleteUploadExternalParameters) (*goslack.CompleteUploadExternalResponse, error) {
+	return &goslack.CompleteUploadExternalResponse{}, nil
+}
+
+func TestDeliverJobResultWithFilesUploads(t *testing.T) {
+	useSlackStoreDir(t)
+
+	var form url.Values
+	client := newSlackTestClient(t, func(rw http.ResponseWriter, req *http.Request) {
+		if err := req.ParseForm(); err != nil {
+			t.Fatalf("ParseForm(): %v", err)
+		}
+		form = req.PostForm
+		slackOKResponse(t, rw, map[string]any{"channel": "C123", "ts": "1710.2"})
+	})
+
+	// Create a temp file to upload
+	tmpFile := t.TempDir() + "/report.txt"
+	if err := os.WriteFile(tmpFile, []byte("report content"), 0o644); err != nil {
+		t.Fatalf("write temp file: %v", err)
+	}
+
+	job := &store.PendingJob{
+		ID:             "job-upload",
+		ConversationID: "slack:C123",
+		Result:         "done\n<send>" + tmpFile + "</send>",
+	}
+	writeJobState(job.ID, jobState{
+		ReplyConversation: chat.ConversationRef{Provider: chat.ProviderSlack, ChannelID: "C123", ThreadID: "1700.2"},
+	})
+
+	uploader := &fakeFileUploader{}
+	if err := DeliverJobResultWithFiles(client, uploader, job); err != nil {
+		t.Fatalf("DeliverJobResultWithFiles(): %v", err)
+	}
+	if got := form.Get("text"); got != "done" {
+		t.Fatalf("text = %q, want 'done'", got)
+	}
+	if len(uploader.uploaded) != 1 || uploader.uploaded[0] != "report.txt" {
+		t.Fatalf("uploaded = %v, want [report.txt]", uploader.uploaded)
 	}
 }
 

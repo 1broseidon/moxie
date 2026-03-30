@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -21,9 +22,15 @@ type sendCall struct {
 	html bool
 }
 
+type rawCall struct {
+	method  string
+	payload interface{}
+}
+
 type fakeBot struct {
 	sendCalls []sendCall
 	sendErrs  []error
+	rawCalls  []rawCall
 }
 
 func (b *fakeBot) Send(to tb.Recipient, what interface{}, opts ...interface{}) (*tb.Message, error) {
@@ -52,6 +59,7 @@ func (b *fakeBot) Delete(msg tb.Editable) error {
 }
 
 func (b *fakeBot) Raw(method string, payload interface{}) ([]byte, error) {
+	b.rawCalls = append(b.rawCalls, rawCall{method: method, payload: payload})
 	return nil, nil
 }
 
@@ -67,6 +75,44 @@ func useBotStoreDir(t *testing.T) {
 	t.Helper()
 	restore := store.SetConfigDir(t.TempDir())
 	t.Cleanup(restore)
+}
+
+func TestRegisterCommandsIncludesSupportedCommands(t *testing.T) {
+	bot := &fakeBot{}
+
+	RegisterCommands(bot)
+
+	if len(bot.rawCalls) != 1 {
+		t.Fatalf("raw calls = %d, want 1", len(bot.rawCalls))
+	}
+	if bot.rawCalls[0].method != "setMyCommands" {
+		t.Fatalf("method = %q, want setMyCommands", bot.rawCalls[0].method)
+	}
+
+	payload, ok := bot.rawCalls[0].payload.(json.RawMessage)
+	if !ok {
+		t.Fatalf("payload type = %T, want json.RawMessage", bot.rawCalls[0].payload)
+	}
+
+	var got struct {
+		Commands []struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+		} `json:"commands"`
+	}
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("json.Unmarshal(): %v", err)
+	}
+
+	commands := chat.SupportedCommands()
+	if len(got.Commands) != len(commands) {
+		t.Fatalf("registered commands = %d, want %d", len(got.Commands), len(commands))
+	}
+	for i, want := range commands {
+		if got.Commands[i].Command != want.Name || got.Commands[i].Description != want.Description {
+			t.Fatalf("command[%d] = %+v, want %+v", i, got.Commands[i], want)
+		}
+	}
 }
 
 func TestRenderActivityHTML(t *testing.T) {
@@ -244,10 +290,10 @@ func TestApplySystemPrompt(t *testing.T) {
 	if !strings.Contains(backends["pi"].SystemPrompt, TelegramSystemPrompt) {
 		t.Fatalf("pi prompt missing telegram system prompt: %q", backends["pi"].SystemPrompt)
 	}
-	if !strings.Contains(backends["pi"].SystemPrompt, "You are running on the pi backend.") {
+	if !strings.Contains(backends["pi"].SystemPrompt, "Backend: pi") {
 		t.Fatalf("pi prompt missing backend identity: %q", backends["pi"].SystemPrompt)
 	}
-	if !strings.Contains(backends["claude"].SystemPrompt, "You are running on the claude backend.") {
+	if !strings.Contains(backends["claude"].SystemPrompt, "Backend: claude") {
 		t.Fatalf("claude prompt missing backend identity: %q", backends["claude"].SystemPrompt)
 	}
 }

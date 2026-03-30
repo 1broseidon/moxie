@@ -40,6 +40,7 @@ type Adapter struct {
 	client     *oneagent.Client
 	schedules  *scheduler.Store
 	api        authTester
+	uploader   fileUploader
 	socket     socketRunner
 	botUserID  string
 }
@@ -65,7 +66,9 @@ func New(cfg *store.Config, defaultCWD string, client *oneagent.Client, schedule
 		return nil, fmt.Errorf("slack auth test failed: %w", err)
 	}
 
-	return NewWithClients(cfg, defaultCWD, client, schedules, api, &socketClient{Client: socketmode.New(api)}), nil
+	adapter := NewWithClients(cfg, defaultCWD, client, schedules, api, &socketClient{Client: socketmode.New(api)})
+	adapter.uploader = api
+	return adapter, nil
 }
 
 func NewWithClients(cfg *store.Config, defaultCWD string, client *oneagent.Client, schedules *scheduler.Store, api authTester, socket socketRunner) *Adapter {
@@ -312,7 +315,7 @@ func (a *Adapter) processInbound(envelope inboundEnvelope) {
 	}
 	result.Job.ReplyConversation = envelope.reply.ID()
 	writeJobState(result.Job.ID, jobState{ReplyConversation: envelope.reply})
-	ProcessJob(*result.Job, a.api, a.client, a.schedules)
+	ProcessJobWithUploader(*result.Job, a.api, a.uploader, a.client, a.schedules)
 }
 
 func normalizeSlashCommandText(raw string) string {
@@ -331,7 +334,7 @@ func (a *Adapter) slashCommandPayload(cmd goslack.SlashCommand) map[string]inter
 	switch {
 	case text == "":
 		return map[string]interface{}{
-			"text":          "Try `/moxie model`, `/moxie new`, `/moxie cwd`, `/moxie threads`, or `/moxie compact`.",
+			"text":          "Try `" + chat.SupportedCommandsHintWithPrefix("/moxie ") + "`.",
 			"response_type": goslack.ResponseTypeEphemeral,
 		}
 	case a.client == nil:
