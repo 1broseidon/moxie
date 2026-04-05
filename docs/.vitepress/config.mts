@@ -39,6 +39,7 @@ export default (async () => {
           items: [
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Backends', link: '/guide/backends' },
+            { text: 'VOICE.md Style Memory', link: '/guide/voice' },
           ],
         },
         {

@@ -24,6 +24,8 @@ var commandHandlers = map[string]func(){
 	"workflow": cmdWorkflow,
 	"result":   cmdResult,
 	"threads":  cmdThreads,
+	"voice":    cmdVoice,
+	"soul":     cmdVoice,
 	"service":  cmdService,
 	"serve":    cmdServe,
 	"help":     usage,
@@ -56,10 +58,11 @@ Usage:
   moxie messages [--json|--raw] [-n N]    List recent messages (default: markdown)
   moxie msg                               Alias for messages
   moxie schedule <subcommand>             Manage schedules
-  moxie subagent <subcommand>              Manage and delegate subagent work
+  moxie subagent <subcommand>             Manage and delegate subagent work
   moxie workflow <subcommand>             Run supervised orchestration workflows
   moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
+  moxie voice <path|show|reset>           Manage Moxie's adjustable style memory
   moxie service <subcommand>              Control the background service
   moxie serve [--cwd <dir>] [--transport <telegram|slack|webex>]  Run configured chat transports and dispatch to agent backends`)
 }

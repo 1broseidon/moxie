@@ -4,7 +4,7 @@
 
 ### `moxie init`
 
-Interactive setup for Telegram. Prompts for bot token, chat ID, and a default workspace, writes `~/.config/moxie/config.json`, and can optionally install/start the background service. This is the recommended first-run path.
+Interactive setup for Telegram. Prompts for bot token, chat ID, and a default workspace, writes `~/.config/moxie/config.json`, creates `~/.config/moxie/VOICE.md`, and can optionally install/start the background service. This is the recommended first-run path.
 
 For Slack and Webex, configure `~/.config/moxie/config.json` manually for now.
 
@@ -141,6 +141,18 @@ View thread history.
 ```bash
 moxie threads show <id>         # Show turns for a thread
 ```
+
+### `moxie voice`
+
+Inspect or reset Moxie's adjustable style memory.
+
+```bash
+moxie voice path                 # Print the VOICE.md path
+moxie voice show                 # Show current VOICE.md
+moxie voice reset                # Restore the default Moxie VOICE
+```
+
+`VOICE.md` lives at `~/.config/moxie/VOICE.md`. Moxie injects it into each new agent run, so edits take effect on the next run without a service restart.
 
 ### `moxie service`
 

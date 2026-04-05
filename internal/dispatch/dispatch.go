@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/scheduler"
 	"github.com/1broseidon/moxie/internal/store"
 	"github.com/1broseidon/oneagent"
@@ -112,23 +113,33 @@ func runBackendWithContext(ctx context.Context, job *store.PendingJob, client *o
 }
 
 func clientWithJobEnv(client *oneagent.Client, job *store.PendingJob) *oneagent.Client {
-	if client == nil || job == nil || strings.TrimSpace(job.ID) == "" || strings.TrimSpace(job.State.Backend) == "" {
+	if client == nil || job == nil || strings.TrimSpace(job.State.Backend) == "" {
 		return client
 	}
 	backend, ok := client.Backends[job.State.Backend]
 	if !ok {
 		return client
 	}
-	wrapped, ok := wrapBackendWithJobEnv(backend, job.ID)
-	if !ok {
+
+	changed := false
+	if resolved := prompt.ResolveDynamicSystemPrompt(backend.SystemPrompt); resolved != backend.SystemPrompt {
+		backend.SystemPrompt = resolved
+		changed = true
+	}
+	if wrapped, ok := wrapBackendWithJobEnv(backend, job.ID); ok {
+		backend = wrapped
+		changed = true
+	}
+	if !changed {
 		return client
 	}
+
 	cloned := *client
 	cloned.Backends = make(map[string]oneagent.Backend, len(client.Backends))
 	for name, candidate := range client.Backends {
 		cloned.Backends[name] = candidate
 	}
-	cloned.Backends[job.State.Backend] = wrapped
+	cloned.Backends[job.State.Backend] = backend
 	return &cloned
 }
 

@@ -371,6 +371,22 @@ Commands available in Telegram, Slack, and Webex direct messages:
 | `/threads [name]` | List or switch threads |
 | `/compact` | Compact the current thread |
 
+## VOICE.md style memory
+
+Moxie keeps an editable style memory at `~/.config/moxie/VOICE.md`. This is the persistent "how should Moxie behave?" file — voice, brevity, stance, and other long-lived personality preferences.
+
+You can edit it directly, use the CLI, or just tell Moxie to rewrite it in chat.
+
+```bash
+moxie voice path     # Print the VOICE.md path
+moxie voice show     # Show current VOICE.md
+moxie voice reset    # Restore the default Moxie VOICE
+```
+
+Edits take effect on the **next agent run**. No service restart is required.
+
+Use VOICE.md for lasting style guidance, not transient task details or secrets.
+
 ## Schedules
 
 Schedule one-time or recurring messages and dispatches:
@@ -451,6 +467,7 @@ moxie workflow run fanout [flags]                   Run a bounded parallel fanou
 moxie workflow <list|show|watch|cancel>             Manage workflows (quiet by default; watch for live output)
 moxie result <subcommand>                           Retrieve subagent results
 moxie threads show <id>                             Show thread turns
+moxie voice <path|show|reset>                        Manage Moxie's adjustable style memory
 moxie service <subcommand>                          Install or control the background service
 moxie serve [--cwd <dir>] [--transport <t>]         Run chat transports
 ```

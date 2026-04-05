@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 
+	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/store"
 )
 
@@ -54,9 +55,13 @@ func cmdInit() {
 		DefaultCWD: defaultCWD,
 	}
 	store.SaveConfig(cfg)
+	if err := prompt.EnsureVoiceFile(); err != nil {
+		fatal("failed to initialize VOICE.md: %v", err)
+	}
 	path := store.ConfigFile("config.json")
 	fmt.Printf("Config saved to %s\n", path)
 	fmt.Printf("Default workspace: %s\n", defaultCWD)
+	fmt.Printf("VOICE.md: %s\n", prompt.VoicePath())
 
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		return

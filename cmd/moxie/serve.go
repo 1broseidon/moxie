@@ -243,6 +243,9 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 	if err != nil {
 		return serveSignalNone, fmt.Errorf("resolve default workspace: %w", err)
 	}
+	if err := prompt.EnsureVoiceFile(); err != nil {
+		log.Printf("VOICE.md initialization failed: %v", err)
+	}
 
 	backends, err := loadServeBackends()
 	if err != nil {

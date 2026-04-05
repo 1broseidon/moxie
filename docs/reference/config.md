@@ -113,6 +113,23 @@ Moxie loads embedded backend defaults and applies overrides from `~/.config/moxi
 
 To customize, create `~/.config/moxie/backends.json`. See [Backends](../guide/backends) for details.
 
+## VOICE.md style memory
+
+Moxie keeps an editable style memory at `~/.config/moxie/VOICE.md`.
+
+This file is not part of `config.json`. It is loaded separately and injected into each new agent run as long-lived voice/personality guidance.
+
+Use it for things like:
+
+- brevity
+- tone
+- humor
+- how direct or opinionated Moxie should be
+
+Do not use it for transient task details, secrets, or transport-specific formatting rules.
+
+Edits take effect on the next agent run; no service restart is required. You can inspect or reset it with `moxie voice show`, `moxie voice path`, and `moxie voice reset`.
+
 ## systemd service
 
 For always-on operation, create `~/.config/systemd/user/moxie-serve.service`, or let `moxie init` / `moxie service install` generate it:
