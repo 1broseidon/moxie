@@ -24,13 +24,16 @@ func TestLoadVoiceCreatesDefaultFile(t *testing.T) {
 	}
 }
 
-func TestEnsureVoiceFileMigratesLegacySoul(t *testing.T) {
+func TestEnsureVoiceFileDoesNotOverwrite(t *testing.T) {
 	cleanup := store.SetConfigDir(t.TempDir())
 	defer cleanup()
 
-	want := "legacy soul"
-	if err := os.WriteFile(legacySoulPath(), []byte(want), 0o600); err != nil {
-		t.Fatalf("WriteFile(legacy) err = %v", err)
+	if err := os.MkdirAll(store.ConfigDir(), 0o700); err != nil {
+		t.Fatalf("MkdirAll() err = %v", err)
+	}
+	want := "custom voice"
+	if err := os.WriteFile(VoicePath(), []byte(want), 0o600); err != nil {
+		t.Fatalf("WriteFile() err = %v", err)
 	}
 
 	if err := EnsureVoiceFile(); err != nil {
@@ -38,34 +41,10 @@ func TestEnsureVoiceFileMigratesLegacySoul(t *testing.T) {
 	}
 	got, err := os.ReadFile(VoicePath())
 	if err != nil {
-		t.Fatalf("ReadFile(VOICE.md) err = %v", err)
+		t.Fatalf("ReadFile() err = %v", err)
 	}
 	if string(got) != want {
-		t.Fatalf("migrated VOICE.md = %q, want %q", string(got), want)
-	}
-	if _, err := os.Stat(legacySoulPath()); !os.IsNotExist(err) {
-		t.Fatalf("legacy SOUL.md still exists, stat err = %v", err)
-	}
-}
-
-func TestEnsureVoiceFileNormalizesLegacyDefaultSoul(t *testing.T) {
-	cleanup := store.SetConfigDir(t.TempDir())
-	defer cleanup()
-
-	legacyDefault := strings.Replace(DefaultVoice(), "# Moxie VOICE", "# Moxie SOUL", 1)
-	if err := os.WriteFile(legacySoulPath(), []byte(legacyDefault), 0o600); err != nil {
-		t.Fatalf("WriteFile(legacy default) err = %v", err)
-	}
-
-	if err := EnsureVoiceFile(); err != nil {
-		t.Fatalf("EnsureVoiceFile() err = %v", err)
-	}
-	got, err := os.ReadFile(VoicePath())
-	if err != nil {
-		t.Fatalf("ReadFile(VOICE.md) err = %v", err)
-	}
-	if strings.TrimSpace(string(got)) != strings.TrimSpace(DefaultVoice()) {
-		t.Fatalf("normalized VOICE.md = %q, want default voice", string(got))
+		t.Fatalf("EnsureVoiceFile() overwrote existing file: got %q, want %q", string(got), want)
 	}
 }
 

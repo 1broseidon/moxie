@@ -10,6 +10,7 @@ import (
 	"github.com/1broseidon/moxie/internal/store"
 )
 
+
 const (
 	// VoicePlaceholder is replaced at run time with the current contents of
 	// ~/.config/moxie/VOICE.md so edits take effect on the next agent run.
@@ -49,10 +50,6 @@ func VoicePath() string {
 	return store.ConfigFile("VOICE.md")
 }
 
-func legacySoulPath() string {
-	return store.ConfigFile("SOUL.md")
-}
-
 func DefaultVoice() string {
 	return defaultVoice
 }
@@ -70,45 +67,10 @@ func EnsureVoiceFile() error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat VOICE.md: %w", err)
 	}
-	if err := migrateLegacySoul(path); err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
 	if err := os.WriteFile(path, []byte(defaultVoice), 0o600); err != nil {
 		return fmt.Errorf("write default VOICE.md: %w", err)
 	}
 	return nil
-}
-
-func migrateLegacySoul(path string) error {
-	legacy := legacySoulPath()
-	if _, err := os.Stat(legacy); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("stat legacy SOUL.md: %w", err)
-	}
-	data, err := os.ReadFile(legacy)
-	if err != nil {
-		return fmt.Errorf("read legacy SOUL.md: %w", err)
-	}
-	data = normalizeLegacyVoiceContent(data)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write migrated VOICE.md: %w", err)
-	}
-	if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove legacy SOUL.md: %w", err)
-	}
-	return nil
-}
-
-func normalizeLegacyVoiceContent(data []byte) []byte {
-	legacyDefault := strings.Replace(defaultVoice, "# Moxie VOICE", "# Moxie SOUL", 1)
-	if strings.TrimSpace(string(data)) == strings.TrimSpace(legacyDefault) {
-		return []byte(defaultVoice)
-	}
-	return data
 }
 
 func LoadVoice() (string, error) {

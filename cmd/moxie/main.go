@@ -25,7 +25,6 @@ var commandHandlers = map[string]func(){
 	"result":   cmdResult,
 	"threads":  cmdThreads,
 	"voice":    cmdVoice,
-	"soul":     cmdVoice,
 	"service":  cmdService,
 	"serve":    cmdServe,
 	"help":     usage,
