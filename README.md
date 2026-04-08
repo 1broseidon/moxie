@@ -4,6 +4,16 @@ Chat agent service that connects Telegram, Slack, and Webex to AI coding agents.
 
 Moxie runs as an always-on service. Messages are dispatched to the configured agent backend CLI and the result is delivered back to Telegram, Slack, or Webex.
 
+### Highlights
+
+- **Multi-transport** — Telegram, Slack, and Webex in one process
+- **Multi-backend** — Claude, Codex, Gemini, Pi, OpenCode; switch with `/model`
+- **Persistent memory** — learns preferences and project context across conversations, recalls on demand
+- **VOICE.md** — editable personality and style file, no restart required
+- **Subagents & workflows** — delegate to other backends or fan out parallel work
+- **Schedules** — one-shot and recurring tasks via cron, intervals, or relative times
+- **Background service** — systemd, launchd, or foreground; `moxie init` sets it up
+
 ## Install
 
 ```bash
@@ -387,6 +397,27 @@ Edits take effect on the **next agent run**. No service restart is required.
 
 Use VOICE.md for lasting style guidance, not transient task details or secrets.
 
+## Persistent memory
+
+Moxie remembers things across conversations. After each exchange, it extracts preferences, decisions, and project facts into a local SQLite database with FTS5 full-text search and optional vector embeddings.
+
+Memory is **on-demand** — the agent searches past context only when it's likely to improve the answer (e.g. "what did we decide about...", "my preferred..."). It doesn't preload memories on every turn.
+
+```bash
+moxie memory recall "auth design"   # Search memories by relevance
+moxie memory list                    # List all stored memories
+moxie memory list --json             # JSON output
+moxie memory stats                   # Count by kind and scope
+moxie memory mode                    # Show current mode
+moxie memory mode off                # Disable capture
+moxie memory mode dry-run            # Extract but don't persist
+moxie memory mode on                 # Enable (default)
+```
+
+Memories are scoped — some are global (user preferences), others are tied to a specific project directory. The agent sees project-relevant memories first.
+
+No external services required. Everything runs locally in SQLite.
+
 ## Schedules
 
 Schedule one-time or recurring messages and dispatches:
@@ -468,6 +499,7 @@ moxie workflow <list|show|watch|cancel>             Manage workflows (quiet by d
 moxie result <subcommand>                           Retrieve subagent results
 moxie threads show <id>                             Show thread turns
 moxie voice <path|show|reset>                        Manage Moxie's adjustable style memory
+moxie memory <recall|list|stats|mode>                Query and inspect stored memories
 moxie service <subcommand>                          Install or control the background service
 moxie serve [--cwd <dir>] [--transport <t>]         Run chat transports
 ```
