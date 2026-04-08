@@ -14,6 +14,7 @@ import (
 	botpkg "github.com/1broseidon/moxie/internal/bot"
 	"github.com/1broseidon/moxie/internal/chat"
 	"github.com/1broseidon/moxie/internal/dispatch"
+	"github.com/1broseidon/moxie/internal/memory"
 	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/scheduler"
 	slackpkg "github.com/1broseidon/moxie/internal/slack"
@@ -247,6 +248,27 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 		log.Printf("VOICE.md initialization failed: %v", err)
 	}
 
+	// Initialize memory store (SQLite). Non-fatal on failure.
+	memStore, err := memory.Open()
+	if err != nil {
+		log.Printf("memory store initialization failed (non-fatal): %v", err)
+	} else {
+		dispatch.MemoryStore = memStore
+		prompt.MemoryStore = memStore
+		defer func() {
+			dispatch.MemoryStore = nil
+			prompt.MemoryStore = nil
+			memStore.Close()
+		}()
+		log.Printf("memory store opened [mode=%s]", memory.CurrentMode())
+
+		// Initialize embedder (pure Go, no external deps). Non-fatal on failure.
+		// Falls back to FTS5-only retrieval if embedding init fails.
+		if embedder := memory.InitEmbedder(); embedder != nil {
+			defer embedder.Close()
+		}
+	}
+
 	backends, err := loadServeBackends()
 	if err != nil {
 		return serveSignalNone, fmt.Errorf("no backends: %w", err)
@@ -257,6 +279,12 @@ func runServeOnce(requestedTransport, requestedCWD string) (serveSignalAction, e
 	if resolved := resolveDefaultBackend(backends); resolved != "" {
 		store.SetDefaultBackend(resolved)
 		log.Printf("default backend: %s", resolved)
+	}
+
+	// Wire LLM-based memory extraction if a backend is available.
+	if memStore != nil {
+		wireMemoryExtraction(backends)
+		defer memory.FlushBuffer(memStore)
 	}
 
 	// Warm whisper detection in the background so voice message metadata is
@@ -367,6 +395,67 @@ func skipOverdueSchedulesForTransport(schedules *scheduler.Store, transport, fal
 		}
 		log.Printf("skipped overdue schedule %s during startup; next run %s", sc.ID, skipped.NextRun.Format("2006-01-02 15:04 MST"))
 	}
+}
+
+// wireMemoryExtraction sets up LLM-based memory extraction using a lightweight
+// model call through the oneagent client. Reads extraction config from config.json:
+//   - memory_extract_backend: which backend to use (default: first available)
+//   - memory_extract_model: which model to request (default: "haiku")
+//   - memory_batch_size: messages to buffer before extraction (default: 5)
+func wireMemoryExtraction(backends map[string]oneagent.Backend) {
+	type extractConfig struct {
+		Backend   string `json:"memory_extract_backend"`
+		Model     string `json:"memory_extract_model"`
+		BatchSize int    `json:"memory_batch_size"`
+	}
+	var cfg extractConfig
+	_ = store.ReadJSON("config.json", &cfg)
+
+	// Resolve backend.
+	backendName := cfg.Backend
+	if backendName == "" {
+		backendName = store.DefaultBackend()
+	}
+	b, ok := backends[backendName]
+	if !ok {
+		log.Printf("memory extraction: backend %q not found, LLM extraction disabled", backendName)
+		return
+	}
+
+	// Resolve model (default to haiku for cost efficiency).
+	model := cfg.Model
+	if model == "" {
+		model = "haiku"
+	}
+
+	// Set batch size.
+	if cfg.BatchSize > 0 {
+		memory.SetBatchSize(cfg.BatchSize)
+	}
+
+	// Clone the backend with an empty system prompt so only the extraction
+	// prompt is sent to the model.
+	extractBackend := b
+	extractBackend.SystemPrompt = ""
+
+	client := &oneagent.Client{
+		Backends: map[string]oneagent.Backend{backendName: extractBackend},
+	}
+
+	memory.ExtractFunc = func(batchText string) ([]memory.Fact, error) {
+		prompt := memory.ExtractionPrompt + "\n\n---\n\n" + batchText
+		resp := client.Run(oneagent.RunOpts{
+			Backend: backendName,
+			Prompt:  prompt,
+			Model:   model,
+		})
+		if resp.Error != "" {
+			return nil, fmt.Errorf("extraction: %s", resp.Error)
+		}
+		return memory.ParseExtraction(resp.Result)
+	}
+
+	log.Printf("memory extraction wired: backend=%s model=%s batch_size=%d", backendName, model, memory.BatchSize())
 }
 
 func loadServeBackends() (map[string]oneagent.Backend, error) {

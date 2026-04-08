@@ -25,6 +25,7 @@ var commandHandlers = map[string]func(){
 	"result":   cmdResult,
 	"threads":  cmdThreads,
 	"voice":    cmdVoice,
+	"memory":   cmdMemory,
 	"service":  cmdService,
 	"serve":    cmdServe,
 	"help":     usage,
@@ -62,6 +63,7 @@ Usage:
   moxie result <subcommand>               Retrieve subagent results
   moxie threads show <id>                 Show turns for a thread
   moxie voice <path|show|reset>           Manage Moxie's adjustable style memory
+  moxie memory <subcommand>              Query and inspect stored memories
   moxie service <subcommand>              Control the background service
   moxie serve [--cwd <dir>] [--transport <telegram|slack|webex>]  Run configured chat transports and dispatch to agent backends`)
 }

@@ -12,7 +12,7 @@ func TestCoreSystemPromptWorkflowGuidance(t *testing.T) {
 		name string
 		want string
 	}{
-		{name: "capabilities include workflow", want: "moxie schedule, moxie subagent, moxie workflow, moxie result, and moxie service"},
+		{name: "capabilities include workflow", want: "moxie schedule, moxie subagent, moxie workflow, moxie result, moxie memory, and moxie service"},
 		{name: "voice file is documented", want: "Moxie keeps an editable style memory at ~/.config/moxie/VOICE.md."},
 		{name: "voice updates are allowed", want: "When the user asks to change how Moxie should behave in future replies, update VOICE.md."},
 		{name: "subagent remains default", want: "Use moxie subagent by default when delegating work to another backend."},

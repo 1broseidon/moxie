@@ -7,11 +7,12 @@ builds:
     main: ./cmd/moxie
     binary: moxie
     env:
-      - CGO_ENABLED=0
+      - CGO_ENABLED=1
+    tags:
+      - fts5
     goos:
       - darwin
       - linux
-      - windows
     goarch:
       - amd64
       - arm64

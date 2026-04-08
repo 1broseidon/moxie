@@ -10,13 +10,21 @@ import (
 	"github.com/1broseidon/moxie/internal/store"
 )
 
-
 const (
 	// VoicePlaceholder is replaced at run time with the current contents of
 	// ~/.config/moxie/VOICE.md so edits take effect on the next agent run.
 	VoicePlaceholder = "__MOXIE_VOICE__"
-	maxVoiceRunes    = 4000
+
+	// MemoryPlaceholder is a legacy placeholder, stripped at resolve time.
+	// Memory recall is now on-demand via "moxie memory recall".
+	MemoryPlaceholder = "__MOXIE_MEMORY__"
+
+	maxVoiceRunes = 4000
 )
+
+// MemoryStore is unused — retained for backward compatibility with serve.go
+// assignments during the transition to on-demand recall via CLI.
+var MemoryStore interface{}
 
 const defaultVoice = `# Moxie VOICE
 
@@ -85,15 +93,23 @@ func LoadVoice() (string, error) {
 }
 
 func ResolveDynamicSystemPrompt(text string) string {
-	if !strings.Contains(text, VoicePlaceholder) {
-		return text
+	return ResolveDynamicSystemPromptForJob(text, "", "")
+}
+
+// ResolveDynamicSystemPromptForJob resolves VOICE placeholders and strips any
+// legacy MEMORY placeholders. Memory recall is now on-demand via "moxie memory recall".
+func ResolveDynamicSystemPromptForJob(text, query, cwd string) string {
+	if strings.Contains(text, VoicePlaceholder) {
+		voice, err := LoadVoice()
+		if err != nil {
+			voice = defaultVoice + "\n\n[VOICE.md could not be loaded; using built-in default.]"
+		}
+		voice = formatVoiceForPrompt(voice)
+		text = strings.ReplaceAll(text, VoicePlaceholder, voice)
 	}
-	voice, err := LoadVoice()
-	if err != nil {
-		voice = defaultVoice + "\n\n[VOICE.md could not be loaded; using built-in default.]"
-	}
-	voice = formatVoiceForPrompt(voice)
-	return strings.ReplaceAll(text, VoicePlaceholder, voice)
+	// Strip legacy memory placeholder — recall is now on-demand via CLI.
+	text = strings.ReplaceAll(text, MemoryPlaceholder, "")
+	return text
 }
 
 func formatVoiceForPrompt(voice string) string {

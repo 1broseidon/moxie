@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/1broseidon/moxie/internal/memory"
 	"github.com/1broseidon/moxie/internal/prompt"
 	"github.com/1broseidon/moxie/internal/scheduler"
 	"github.com/1broseidon/moxie/internal/store"
@@ -25,6 +26,9 @@ var (
 	dispatchLocks     sync.Map
 	shuttingDown      atomic.Bool
 	runModelFunc      = RunModel
+
+	// MemoryStore is set at startup to enable post-delivery memory capture.
+	MemoryStore *memory.Store
 )
 
 func SetRunModelFuncForTest(fn func(*store.PendingJob, *oneagent.Client, func(string)) (string, bool)) func() {
@@ -122,7 +126,7 @@ func clientWithJobEnv(client *oneagent.Client, job *store.PendingJob) *oneagent.
 	}
 
 	changed := false
-	if resolved := prompt.ResolveDynamicSystemPrompt(backend.SystemPrompt); resolved != backend.SystemPrompt {
+	if resolved := prompt.ResolveDynamicSystemPromptForJob(backend.SystemPrompt, job.Prompt, job.CWD); resolved != backend.SystemPrompt {
 		backend.SystemPrompt = resolved
 		changed = true
 	}
@@ -380,6 +384,14 @@ func deliverAndFinalize(job *store.PendingJob, schedules *scheduler.Store, callb
 	}
 	finalizeSchedule(job, schedules)
 	writeArtifact(job)
+
+	// Memory capture runs after delivery so failures never block the response.
+	if MemoryStore != nil {
+		if err := memory.Capture(MemoryStore, *job); err != nil {
+			log.Printf("memory capture error for %s: %v", job.ID, err)
+		}
+	}
+
 	store.CleanupJobTemp(*job)
 	store.RemoveJob(job.ID)
 }

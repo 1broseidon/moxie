@@ -2,6 +2,25 @@
 
 All notable changes to Moxie are documented here.
 
+## [0.5.0] - 2026-04-08
+
+### Added
+
+- **Persistent memory system** — SQLite-backed store with FTS5 full-text search and optional vector embeddings for semantic recall
+- **`moxie memory` CLI** with subcommands: `recall <query>`, `list [--json]`, `stats`, `mode [off|dry-run|on]`
+- Automatic memory capture after job delivery — extracts preferences, decisions, and project facts from conversations via LLM
+- On-demand memory recall in agent system prompt — model can search past context when relevant without preloading on every turn
+- `CLAUDE.md` project conventions file
+- `Makefile` for common dev tasks
+
+### Changed
+
+- System prompt now advertises `moxie memory` as an available capability
+- `ResolveDynamicSystemPrompt` extended to `ResolveDynamicSystemPromptForJob`, accepting job context for future memory-aware prompt resolution
+- Legacy `__MOXIE_MEMORY__` placeholder is now stripped at resolve time (recall is on-demand via CLI)
+- Build requires `CGO_ENABLED=1` and `fts5` build tag for SQLite FTS5 support
+- goreleaser config updated: CGO enabled, `fts5` tag added, Windows target removed (CGO cross-compile constraint)
+
 ## [0.4.1] - 2026-03-30
 
 ### Added
