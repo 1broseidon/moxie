@@ -15,8 +15,27 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+          - runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            cross: true
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Resolve release ref
@@ -28,27 +47,140 @@ jobs:
             echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check out code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ steps.ref.outputs.ref }}
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Run tests
-        run: go test ./...
+        if: ${{ !matrix.cross }}
+        run: CGO_CFLAGS="-DSQLITE_ENABLE_FTS5" go test -tags fts5 ./...
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+      - name: Build
+        run: |
+          LDFLAGS="-s -w"
+          CGO_FLAGS="-DSQLITE_ENABLE_FTS5"
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            CGO_FLAGS="$CGO_FLAGS -arch x86_64"
+            export CGO_LDFLAGS="-arch x86_64"
+          fi
+          CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            CGO_CFLAGS="$CGO_FLAGS" \
+            go build -tags fts5 -trimpath -ldflags="$LDFLAGS" -o moxie ./cmd/moxie
+          tar czf "moxie_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" moxie
+
+      - uses: actions/upload-artifact@v4
         with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
+          name: moxie_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: moxie_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Rename and checksum
+        run: |
+          cd dist
+          TAG=${{ steps.tag.outputs.tag }}
+          for f in moxie_*.tar.gz; do
+            [ -e "$f" ] || continue
+            arch=$(echo "$f" | sed 's/moxie_\(.*\)\.tar\.gz/\1/' | sed 's/amd64/x86_64/')
+            mv "$f" "moxie_${TAG}_${arch}.tar.gz"
+          done
+          sha256sum moxie_${TAG}_*.tar.gz > checksums.txt
+          ls -la
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: |
+            dist/moxie_*.tar.gz
+            dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Homebrew formula
+        env:
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          VERSION="${TAG#v}"
+          cd dist
+
+          SHA_DARWIN_ARM64=$(sha256sum moxie_${TAG}_darwin_arm64.tar.gz | cut -d' ' -f1)
+          SHA_DARWIN_X86=$(sha256sum moxie_${TAG}_darwin_x86_64.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_X86=$(sha256sum moxie_${TAG}_linux_x86_64.tar.gz | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(sha256sum moxie_${TAG}_linux_arm64.tar.gz | cut -d' ' -f1)
+
+          cat > /tmp/moxie.rb << FORMULA
+          # typed: false
+          # frozen_string_literal: true
+
+          class Moxie < Formula
+            desc "Chat agent service connecting Telegram, Slack, and Webex to AI coding agents"
+            homepage "https://github.com/1broseidon/moxie"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/1broseidon/moxie/releases/download/${TAG}/moxie_${TAG}_darwin_arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/1broseidon/moxie/releases/download/${TAG}/moxie_${TAG}_darwin_x86_64.tar.gz"
+                sha256 "${SHA_DARWIN_X86}"
+              end
+
+              define_method(:install) do
+                bin.install "moxie"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
+                url "https://github.com/1broseidon/moxie/releases/download/${TAG}/moxie_${TAG}_linux_x86_64.tar.gz"
+                sha256 "${SHA_LINUX_X86}"
+              elsif Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+                url "https://github.com/1broseidon/moxie/releases/download/${TAG}/moxie_${TAG}_linux_arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              end
+
+              define_method(:install) do
+                bin.install "moxie"
+              end
+            end
+          end
+          FORMULA
+
+          sed -i 's/^          //' /tmp/moxie.rb
+
+          cd /tmp
+          git clone "https://x-access-token:${HOMEBREW_TAP_GITHUB_TOKEN}@github.com/1broseidon/homebrew-tap.git"
+          cp moxie.rb homebrew-tap/Formula/moxie.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/moxie.rb
+          git commit -m "formula: update moxie to ${TAG}" || true
+          git push
