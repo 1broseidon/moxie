@@ -16,9 +16,21 @@ Moxie runs as an always-on service. Messages are dispatched to the configured ag
 
 ## Install
 
+### Homebrew (recommended)
+
 ```bash
-go install github.com/1broseidon/moxie/cmd/moxie@latest
+brew install 1broseidon/tap/moxie
 ```
+
+### From source
+
+Moxie uses SQLite with FTS5 for its memory system, which requires CGO:
+
+```bash
+CGO_ENABLED=1 go install -tags fts5 github.com/1broseidon/moxie/cmd/moxie@latest
+```
+
+A C compiler (`gcc` or `clang`) must be available. On Debian/Ubuntu: `sudo apt install build-essential`. On macOS, Xcode command-line tools are sufficient.
 
 Requires Go 1.24+ and at least one agent CLI installed (see [Agent backends](#agent-backends)).
 
